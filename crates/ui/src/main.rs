@@ -470,10 +470,10 @@ impl App {
                         ui,
                         &[
                             ("pack", format!("{:.3} V", s.pack_v), theme::TRACE),
-                            ("current", format!("{:+.2} A", s.current_a), theme::TRACE),
+                            ("current", format!("{:+.3} A", s.current_a), theme::TRACE),
                             (
                                 "power",
-                                format!("{:+.1} W", s.pack_v * s.current_a),
+                                format!("{:+.2} W", s.pack_v * s.current_a),
                                 theme::TRACE,
                             ),
                             ("soc est", format!("{}%", s.soc), theme::READOUT),
@@ -495,10 +495,10 @@ impl App {
                         ui,
                         &[
                             ("pack", format!("{:.3} V", s.pack_v), theme::TRACE),
-                            ("current", format!("{:+.2} A", s.current_a), theme::TRACE),
+                            ("current", format!("{:+.3} A", s.current_a), theme::TRACE),
                             (
                                 "power",
-                                format!("{:+.1} W", s.pack_v * s.current_a),
+                                format!("{:+.2} W", s.pack_v * s.current_a),
                                 theme::TRACE,
                             ),
                             ("soc", format!("{}%", s.soc), theme::VALUE),
@@ -602,13 +602,13 @@ impl App {
                 theme::readouts(
                     ui,
                     &[
-                        ("out", format!("{v:.2} V"), theme::TRACE),
-                        ("current", format!("{a:.2} A"), theme::TRACE),
-                        ("power", format!("{:.1} W", v * a), theme::TRACE),
+                        ("out", format!("{v:.3} V"), theme::TRACE),
+                        ("current", format!("{a:.3} A"), theme::TRACE),
+                        ("power", format!("{:.2} W", v * a), theme::TRACE),
                         (
                             "set",
                             format!(
-                                "{:.2} A",
+                                "{:.3} A",
                                 last.as_ref().map(|u| u.demand.charger_a).unwrap_or(0.0)
                             ),
                             theme::READOUT,
@@ -691,8 +691,8 @@ impl App {
                     theme::readouts(
                         ui,
                         &[
-                            ("draw", format!("{draw_a:.2} A"), theme::TRACE),
-                            ("power", format!("{:.1} W", draw_a * volts), theme::TRACE),
+                            ("draw", format!("{draw_a:.3} A"), theme::TRACE),
+                            ("power", format!("{:.2} W", draw_a * volts), theme::TRACE),
                         ],
                     );
                     theme::note(
@@ -720,13 +720,13 @@ impl App {
                         &[
                             (
                                 "in",
-                                format!("{:.2} V", l.volts),
+                                format!("{:.3} V", l.volts),
                                 if wrong_battery { theme::FAULT } else { theme::TRACE },
                             ),
-                            ("draw", format!("{:.2} A", l.amps), theme::TRACE),
-                            ("power", format!("{:.1} W", l.watts), theme::TRACE),
-                            ("drawn", format!("{:.3} Ah", l.amp_hours), theme::READOUT),
-                            ("energy", format!("{:.1} Wh", l.watt_hours), theme::VALUE),
+                            ("draw", format!("{:.3} A", l.amps), theme::TRACE),
+                            ("power", format!("{:.2} W", l.watts), theme::TRACE),
+                            ("drawn", format!("{:.4} Ah", l.amp_hours), theme::READOUT),
+                            ("energy", format!("{:.2} Wh", l.watt_hours), theme::VALUE),
                             ("temp", format!("{:.0} C", l.temp_c), theme::VALUE),
                             ("run", format!("{:.0} min", l.runtime_s / 60.0), theme::VALUE),
                         ],
