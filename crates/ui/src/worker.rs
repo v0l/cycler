@@ -78,7 +78,134 @@ impl Session {
     }
 }
 
+/// A session with nothing behind it, for the screenshots in `docs/` and for
+/// working on the panel without a pack on the bench. It plays back three
+/// hours of a 15S charge and then keeps going in real time.
+pub fn demo_update(at: Instant, minute: f64) -> Update {
+    use cycler_core::charge::{Mode, Phase};
+    use cycler_core::device::{LoadMode, Regulation};
+    const N: usize = 15;
+    const REST: [i16; N] = [1, 11, 14, -8, -4, -30, 9, -4, -3, -4, 15, -16, 0, 9, 25];
+    let taper = (-minute / 55.0).exp();
+    let current = 0.20 + 2.80 * taper;
+    let climb = 3452.0 - 34.0 * taper;
+    let cells: Vec<u16> = REST
+        .iter()
+        .enumerate()
+        .map(|(i, off)| {
+            let wobble = ((minute / 7.0) + i as f64).sin() * 1.5;
+            (climb + *off as f64 * (1.0 + 0.6 * (1.0 - taper)) + wobble).round() as u16
+        })
+        .collect();
+    let pack_v = cells.iter().map(|c| *c as f64).sum::<f64>() / 1000.0;
+    let hi = cells.iter().copied().max().unwrap_or(0);
+    let balancing = cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c >= hi - 18)
+        .map(|(i, _)| i)
+        .collect();
+    Update {
+        at,
+        snapshot: Some(Snapshot {
+            cells_mv: cells,
+            balancing,
+            pack_v,
+            current_a: current,
+            temp_c: 23.1 + minute / 240.0,
+            soc: 100,
+            soc_estimated: false,
+            alarms: Vec::new(),
+            soh: Some(87.0),
+            cycles: Some(1328.0),
+            rated_ah: Some(50.0),
+        }),
+        demand: Demand {
+            charger_on: true,
+            charger_v: 52.50,
+            charger_a: 3.0,
+            load_on: false,
+            load_mode: LoadMode::Cc,
+            load_value: 0.0,
+            load_cutoff_v: 45.0,
+        },
+        note: format!("absorb {:.1} h, 52.50 V, {current:.2} A (term 2.50)", minute / 60.0),
+        running: true,
+        plan_steps: 4,
+        plan_repeat: 3,
+        cycle: 1,
+        step_label: "charge Standard".into(),
+        step_index: 0,
+        plan_labels: vec![
+            "charge".into(),
+            "rest 30 m".into(),
+            "discharge".into(),
+            "rest 30 m".into(),
+        ],
+        charge_stage: Some((Mode::Standard, Phase::Absorb)),
+        results: Vec::new(),
+        measured_ah: Some(46.2),
+        error: None,
+        pack_name: "US2000C K21C022C321C1526".into(),
+        charger_name: "OWON,SPE6103,25521912,FV:V5.5.0".into(),
+        has_charger: true,
+        charger: Some((pack_v + 0.04, current)),
+        charger_output: Some(true),
+        charger_regulation: Some(Regulation::Cv),
+        load_name: "ATORCH DL24 V1.0.9".into(),
+        has_load: true,
+        load: Some(LoadState {
+            setpoint: 3.0,
+            volts: pack_v + 0.05,
+            temp_c: 24.0,
+            ..Default::default()
+        }),
+        mismatch: None,
+        load_manual: false,
+        load_modes: vec![LoadMode::Cc, LoadMode::Cp, LoadMode::Cv, LoadMode::Cr],
+    }
+}
+
 impl Session {
+    /// How far back the playback starts, so the caller can line its clock up
+    /// with the backlog this session is about to send.
+    pub const DEMO_HISTORY: Duration = Duration::from_secs(3 * 3600);
+
+    pub fn demo() -> Self {
+        let (tx, cmd_rx) = channel::<Command>();
+        let (up_tx, rx) = channel::<Update>();
+        let handle = std::thread::spawn(move || {
+            let step = Duration::from_secs(30);
+            let t0 = Instant::now();
+            let start = t0 - Session::DEMO_HISTORY;
+            let mut minute = 0.0;
+            while start + Duration::from_secs_f64(minute * 60.0) < t0 {
+                let at = start + Duration::from_secs_f64(minute * 60.0);
+                if up_tx.send(demo_update(at, minute)).is_err() {
+                    return;
+                }
+                minute += step.as_secs_f64() / 60.0;
+            }
+            loop {
+                if matches!(cmd_rx.recv_timeout(step), Ok(Command::Quit)) {
+                    return;
+                }
+                minute += step.as_secs_f64() / 60.0;
+                if up_tx
+                    .send(demo_update(Instant::now(), minute))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Self {
+            tx,
+            rx,
+            handle: Some(handle),
+        }
+    }
+
     pub fn spawn(
         pack_spec: String,
         charger_spec: String,

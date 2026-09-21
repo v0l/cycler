@@ -95,6 +95,10 @@ struct App {
 
 impl App {
     fn new(log: Option<PathBuf>) -> Self {
+        Self::build(log, true)
+    }
+
+    fn build(log: Option<PathBuf>, live: bool) -> Self {
         let mut app = Self {
             session: None,
             log,
@@ -153,7 +157,34 @@ impl App {
             &mut app.charger_pick,
             &mut app.load_pick,
         ]);
-        app.connect();
+        if live {
+            app.connect();
+        }
+        app
+    }
+
+    /// A panel with nothing behind it, for the screenshots in `docs/` and for
+    /// working on the layout away from the bench.
+    fn demo() -> Self {
+        let mut app = Self::build(None, false);
+        app.profile = PackProfile {
+            chemistry: Chemistry::LiFePo4,
+            series: 15,
+            parallel: 1,
+            cell_ah: 50.0,
+            ceiling_mv: None,
+        };
+        app.apply_profile();
+        app.pack_pick.backend = 0;
+        app.pack_pick.enabled = true;
+        app.max_current = 3.0;
+        app.discharge_a = 5.0;
+        app.discharge_c = 0.1;
+        app.i_term = Some(2.5);
+        app.history.clear();
+        app.started = Instant::now() - Session::DEMO_HISTORY;
+        app.session = Some(Session::demo());
+        app.active = app.selected_specs();
         app
     }
 
@@ -581,12 +612,22 @@ impl eframe::App for App {
                 // Whatever is left over is split between the two views that
                 // reward the space: the comb of cells now, and the traces
                 // that got them there.
-                if self.has_cells() {
-                    let spare = (ui.available_height() - 8.0).max(0.0);
-                    let comb_h = (spare * 0.44 - CARD_CHROME).clamp(COMB_MIN_H, 300.0);
+                // Split what is left rather than letting each card claim a
+                // minimum: two minimums in a short window overflow the panel
+                // and the chart falls off the bottom of the screen.
+                // From the cursor to the bottom of the window. The root Ui
+                // hands out a stale height once the window has been resized,
+                // so the screen is the only thing worth measuring against.
+                let spare = (ui.ctx().content_rect().bottom() - 8.0 - ui.cursor().top()).max(80.0);
+                let chart_h = if self.has_cells() {
+                    let usable = (spare - 8.0 - 2.0 * CARD_CHROME).max(80.0);
+                    let comb_h = (usable * 0.44)
+                        .clamp(60.0, COMB_MIN_H.max(300.0_f32.min(usable - CHART_MIN_H)));
                     self.cells_card(ui, comb_h);
-                }
-                let chart_h = (ui.available_height() - CARD_CHROME).max(CHART_MIN_H);
+                    (usable - comb_h).max(90.0)
+                } else {
+                    (spare - CARD_CHROME).max(CHART_MIN_H)
+                };
                 self.history_card(ui, chart_h);
             });
     }
@@ -2243,6 +2284,7 @@ fn stop_hardware_on_signal() {
 }
 
 fn main() -> eframe::Result<()> {
+    let demo = std::env::args().any(|a| a == "--demo");
     let log = std::env::var_os("CYCLER_LOG").map(PathBuf::from);
     stop_hardware_on_signal();
     let options = eframe::NativeOptions {
@@ -2256,7 +2298,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
-            Ok(Box::new(App::new(log)))
+            Ok(Box::new(if demo { App::demo() } else { App::new(log) }))
         }),
     )
 }
