@@ -142,6 +142,7 @@ impl App {
         if let Ok(mut g) = SHUTDOWN.lock() {
             *g = Some(session.tx.clone());
         }
+        let _ = session.tx.send(Command::SetProfile(self.profile));
         self.session = Some(session);
     }
 
@@ -411,6 +412,7 @@ impl App {
             (_, Some(c)) if c => "charger",
             _ => "instrument",
         };
+        let chem = self.profile.chemistry.label();
         let ceiling = self.ceiling_mv;
         let measured = self
             .last
@@ -448,14 +450,16 @@ impl App {
                                 format!("{:+.1} W", s.pack_v * s.current_a),
                                 theme::TRACE,
                             ),
+                            ("soc est", format!("{}%", s.soc), theme::READOUT),
                         ],
                     );
                     theme::note(
                         ui,
                         format!(
-                            "No BMS: read by the {}. Limits are pack voltage only, and \
-                             nothing here knows what the cells are doing.",
-                            source
+                            "No BMS: read by the {}. SOC is estimated from {} voltage and \
+                             is only honest at rest; limits are pack voltage only.",
+                            source,
+                            chem
                         ),
                         theme::LEGEND,
                     );
@@ -869,6 +873,7 @@ impl App {
     }
 
     fn profile_card(&mut self, ui: &mut egui::Ui) {
+        let before = self.profile;
         let mut apply = false;
         let capacity = self.capacity_ah();
         let snapshot = self.last.as_ref().and_then(|u| u.snapshot.clone());
@@ -943,6 +948,11 @@ impl App {
         );
         if apply {
             self.apply_profile();
+        }
+        // A blind pack works out its SOC from the profile, so it needs to know
+        // the moment the profile changes.
+        if self.profile != before {
+            self.send(Command::SetProfile(self.profile));
         }
     }
 

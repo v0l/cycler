@@ -8,6 +8,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel}
 use std::time::{Duration, Instant};
 
 pub enum Command {
+    /// What the battery is, for a pack that cannot say so itself.
+    SetProfile(cycler_core::chemistry::PackProfile),
     Start(Plan),
     Stop,
     Quit,
@@ -244,6 +246,11 @@ fn run(
                         dev.load.as_ref().map(|l| !l.controllable()).unwrap_or(false),
                     );
                     runner = Some(r);
+                }
+                Ok(Command::SetProfile(p)) => {
+                    if let Some(pack) = dev.pack.as_mut() {
+                        pack.set_profile(p);
+                    }
                 }
                 Ok(Command::Stop) => {
                     stop_all(&mut dev);

@@ -81,6 +81,12 @@ enum Cmd {
         /// Stop at this state of charge, e.g. 50 for storage.
         #[arg(long)]
         stop_at_soc: Option<u8>,
+        /// Chemistry of a pack with no BMS, for voltage-derived SOC.
+        #[arg(long, value_enum, default_value_t = ChemArg::Lifepo4)]
+        chemistry: ChemArg,
+        /// Cells in series, for a pack with no BMS.
+        #[arg(long, default_value_t = 15)]
+        series: u16,
         /// Append every sample to this CSV.
         #[arg(long)]
         log: Option<std::path::PathBuf>,
@@ -101,6 +107,12 @@ enum Cmd {
         /// Stop at this state of charge, e.g. 50 for storage.
         #[arg(long)]
         stop_at_soc: Option<u8>,
+        /// Chemistry of a pack with no BMS, for voltage-derived SOC.
+        #[arg(long, value_enum, default_value_t = ChemArg::Lifepo4)]
+        chemistry: ChemArg,
+        /// Cells in series, for a pack with no BMS.
+        #[arg(long, default_value_t = 15)]
+        series: u16,
         #[arg(long, default_value_t = 5)]
         interval: u64,
         #[arg(long)]
@@ -315,9 +327,16 @@ fn main() -> Result<()> {
             interval,
             hold_hours,
             stop_at_soc,
+            chemistry,
+            series,
             log,
         } => {
             let mut pack = pack::open_pack(&pack_spec)?;
+            pack.set_profile(cycler_core::chemistry::PackProfile {
+                chemistry: chemistry.into(),
+                series,
+                ..Default::default()
+            });
             let mut charger = device::open_charger(&charger_spec)?;
             println!("{} <- {}", pack.name(), charger.name());
             let cfg = charge::Config {
@@ -380,10 +399,17 @@ fn main() -> Result<()> {
             setpoint,
             floor_mv,
             stop_at_soc,
+            chemistry,
+            series,
             interval,
             log,
         } => {
             let mut pack = pack::open_pack(&pack_spec)?;
+            pack.set_profile(cycler_core::chemistry::PackProfile {
+                chemistry: chemistry.into(),
+                series,
+                ..Default::default()
+            });
             let mut load = cycler_core::open_discharger(&load_spec)?;
             println!("{} -> {}", pack.name(), load.name());
             let plan = cycler_core::cycle::Plan::discharge(cycler_core::discharge::Config {

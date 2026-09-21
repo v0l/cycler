@@ -111,6 +111,7 @@ mod tests {
             current_a: 1.25,
             temp_c: 24.5,
             soc: 34,
+            soc_estimated: false,
             soh: Some(87.0),
             cycles: Some(1328.0),
             alarms: Vec::new(),

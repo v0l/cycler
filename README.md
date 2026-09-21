@@ -29,7 +29,8 @@ hand. A battery with no BMS at all works too, on voltage limits alone.
   voltage and current limit follows. Series is taken from the BMS when there is
   one, guessed from resting voltage when there is not.
 - **Charge a battery with no BMS** (lead-acid, a bare pack) on pack-voltage
-  limits, using the charger as the voltmeter.
+  limits, read by whichever instrument can see the terminals, with SOC
+  estimated from the chemistry's open-circuit curve.
 - **Show the BMS's own alarms**, so a protection state is visible rather than
   inferred from the numbers.
 - **Log** every sample to CSV: pack, current, SOC, SOH, cycles, temperature,
@@ -42,7 +43,7 @@ hand. A battery with no BMS at all works too, on voltage limits alone.
 |---|---|---|
 | Pack, serial | `pylontech-console`, `pylontech-rs485`, `seplos`, `pace`, `daly`, `jk`, `jbd` | Any [battery-control](https://github.com/v0l/battery-control) backend that reports cells. Baud and RS485 address default per protocol; override with `BMS_BAUD` and `BMS_ADDRESS`. |
 | Pack, Bluetooth | `jk-ble`, `jbd-ble`, `sok`, `renogy` | Found by scanning; the target is the BLE address. Scan length is `BLE_SCAN_SECS`, default 6. |
-| Pack, none | `none` | No BMS: lead-acid, or a bare pack on a plain charger. Voltage and current come from whichever instrument is connected and every limit becomes a pack-voltage limit. |
+| Pack, none | `none` | No BMS: lead-acid, or a bare pack on a plain charger. Voltage and current come from whichever instrument can see the terminals, every limit becomes a pack-voltage limit, and SOC is interpolated from the chemistry's OCV curve (a rest-only estimate). |
 | Charger | `owon` | OWON SPE/SP/SPS series over SCPI, including CC/CV regulation readback. |
 | Load | `oel` | OWON OEL15/30/60 series over SCPI, including the instrument's own battery test mode. |
 | Load | `dl24` | Atorch DL24 over USB HID. Mind the voltage rating: the family shares one USB id across very different models. |

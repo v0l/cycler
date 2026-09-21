@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use battery_control::Reading;
+use crate::chemistry::PackProfile;
 use battery_control::{Battery, DeviceInfo};
 
 #[derive(Debug, Clone, Default)]
@@ -10,6 +11,9 @@ pub struct Snapshot {
     pub current_a: f64,
     pub temp_c: f64,
     pub soc: u8,
+    /// True when the SOC is derived from voltage rather than reported by a
+    /// BMS, which matters: under load it can be badly wrong.
+    pub soc_estimated: bool,
     /// Whatever the BMS is complaining about right now.
     pub alarms: Vec<String>,
     pub soh: Option<f64>,
@@ -143,6 +147,12 @@ pub trait Pack {
         false
     }
 
+    /// Tell the pack what it is. Only a pack with no BMS cares: it is the
+    /// only way it can turn a terminal voltage into a state of charge.
+    fn set_profile(&mut self, profile: PackProfile) {
+        let _ = profile;
+    }
+
     /// What the charger or load is measuring at its terminals. A blind pack
     /// has no other source of truth, so the run loop hands it the instrument
     /// reading before each read.
@@ -180,6 +190,7 @@ pub struct BlindPack {
     name: String,
     volts: f64,
     amps: f64,
+    profile: PackProfile,
 }
 
 impl BlindPack {
@@ -192,6 +203,7 @@ impl BlindPack {
             },
             volts: 0.0,
             amps: 0.0,
+            profile: PackProfile::default(),
         }
     }
 }
@@ -205,15 +217,29 @@ impl Pack for BlindPack {
         true
     }
 
+    fn set_profile(&mut self, profile: PackProfile) {
+        self.profile = profile;
+    }
+
     fn observe(&mut self, volts: f64, amps: f64) {
         self.volts = volts;
         self.amps = amps;
     }
 
     fn read(&mut self) -> Result<Snapshot> {
+        // SOC from the chemistry curve. Honest only at rest, so it is an
+        // estimate and the UI says so.
+        let soc = if self.volts > 0.5 {
+            self.profile.soc_from_pack_v(self.volts).round() as u8
+        } else {
+            0
+        };
         Ok(Snapshot {
             pack_v: self.volts,
             current_a: self.amps,
+            soc,
+            soc_estimated: true,
+            rated_ah: Some(self.profile.capacity_ah()),
             ..Default::default()
         })
     }
@@ -276,6 +302,7 @@ impl<B: Battery> Pack for BcPack<B> {
                 .or_else(|| s.temperature("temp.pack"))
                 .unwrap_or(0.0),
             soc: s.soc().unwrap_or(0.0) as u8,
+            soc_estimated: false,
             alarms: s.alarms.clone(),
             soh: s.get(Reading::Soh),
             cycles: s.get(Reading::Cycles),

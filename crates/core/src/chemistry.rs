@@ -95,6 +95,52 @@ impl Chemistry {
         }
     }
 
+    /// Open-circuit voltage against state of charge, per cell, as millivolts
+    /// at 0, 10, 20 ... 100%. Coarse on purpose: these are bench figures at
+    /// room temperature, and the flat chemistries cannot do better.
+    pub fn ocv_curve(self) -> [u16; 11] {
+        match self {
+            // Famously flat: 20% and 80% differ by about 40 mV, which is why
+            // a voltage-derived SOC on LiFePO4 is a rough guide and nothing
+            // more.
+            Chemistry::LiFePo4 => [
+                2500, 3000, 3200, 3250, 3270, 3290, 3300, 3310, 3330, 3350, 3450,
+            ],
+            Chemistry::LiIon => [
+                3000, 3400, 3550, 3620, 3690, 3760, 3840, 3930, 4020, 4110, 4200,
+            ],
+            Chemistry::Lto => [
+                1800, 2050, 2150, 2200, 2230, 2260, 2290, 2330, 2400, 2500, 2700,
+            ],
+            // The standard rested table, per 2 V cell: 12.70 V full and
+            // 11.40 V empty on a 6-cell battery.
+            Chemistry::LeadAcid => [
+                1900, 1930, 1958, 1983, 2010, 2033, 2053, 2070, 2083, 2103, 2117,
+            ],
+        }
+    }
+
+    /// State of charge from a resting cell voltage, by interpolating the
+    /// curve. Only meaningful at rest: current through the pack's internal
+    /// resistance shifts the terminal voltage either way.
+    pub fn soc_from_cell_mv(self, mv: u16) -> f64 {
+        let curve = self.ocv_curve();
+        if mv <= curve[0] {
+            return 0.0;
+        }
+        if mv >= curve[10] {
+            return 100.0;
+        }
+        for i in 1..curve.len() {
+            if mv <= curve[i] {
+                let (lo, hi) = (curve[i - 1] as f64, curve[i] as f64);
+                let step = (mv as f64 - lo) / (hi - lo);
+                return ((i - 1) as f64 + step) * 10.0;
+            }
+        }
+        100.0
+    }
+
     /// The chemistry a resting cell voltage belongs to. Only a suggestion: a
     /// BMS reports cells, never what they are made of, and a flat LiFePO4 cell
     /// and a mid-charge lead-acid cell read alike.
@@ -172,6 +218,13 @@ impl PackProfile {
         (self.capacity_ah() * c).max(0.1)
     }
 
+    /// Estimated state of charge from terminal voltage. A guess, and worth
+    /// treating as one: it is only honest at rest.
+    pub fn soc_from_pack_v(&self, volts: f64) -> f64 {
+        let per_cell = volts / self.series.max(1) as f64 * 1000.0;
+        self.chemistry.soc_from_cell_mv(per_cell.clamp(0.0, 65_535.0) as u16)
+    }
+
     /// Adopt the series count a BMS is reporting. It knows better than a
     /// setting does.
     pub fn observe_cells(&mut self, cells: usize) {
@@ -226,6 +279,38 @@ mod tests {
         assert_eq!(Chemistry::LiFePo4.series_from_voltage(51.2), 16);
         assert_eq!(Chemistry::LeadAcid.series_from_voltage(12.6), 6);
         assert_eq!(Chemistry::LiIon.series_from_voltage(44.4), 12);
+    }
+
+    #[test]
+    fn soc_is_interpolated_from_the_curve() {
+        let li = Chemistry::LiIon;
+        assert_eq!(li.soc_from_cell_mv(2000), 0.0);
+        assert_eq!(li.soc_from_cell_mv(4300), 100.0);
+        assert!((li.soc_from_cell_mv(3760) - 50.0).abs() < 1e-9);
+        // Half way between the 50% and 60% points.
+        assert!((li.soc_from_cell_mv(3800) - 55.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_12v_lead_acid_battery_reads_its_usual_numbers() {
+        let p = PackProfile {
+            chemistry: Chemistry::LeadAcid,
+            series: 6,
+            ..Default::default()
+        };
+        // 12.7 V rested is full, 12.0 V is a third, 11.4 V is flat.
+        assert!(p.soc_from_pack_v(12.75) > 95.0);
+        assert!((p.soc_from_pack_v(12.0) - 35.0).abs() < 10.0);
+        assert!(p.soc_from_pack_v(11.35) < 2.0);
+    }
+
+    #[test]
+    fn a_flat_lifepo4_pack_still_orders_correctly() {
+        let p = PackProfile::default();
+        let low = p.soc_from_pack_v(15.0 * 3.20);
+        let mid = p.soc_from_pack_v(15.0 * 3.29);
+        let high = p.soc_from_pack_v(15.0 * 3.34);
+        assert!(low < mid && mid < high, "{low} {mid} {high}");
     }
 
     #[test]
