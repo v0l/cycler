@@ -39,6 +39,15 @@ impl Choice {
         self.backends.get(self.backend)
     }
 
+    /// Whether this backend has a port to choose at all. A blind pack or a
+    /// load switched by hand has nothing to enumerate, so offering a picker
+    /// with one meaningless entry is just noise.
+    pub fn has_ports(&self) -> bool {
+        self.backend()
+            .map(|b| b.transport != Transport::Manual)
+            .unwrap_or(false)
+    }
+
     pub fn scanning(&self) -> bool {
         self.pending.is_some()
     }

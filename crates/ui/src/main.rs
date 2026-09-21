@@ -672,6 +672,10 @@ impl App {
                         ui.add_space(4.0);
                         continue;
                     }
+                    if !pick.has_ports() {
+                        ui.add_space(4.0);
+                        continue;
+                    }
                     let target = pick
                         .selected()
                         .map(|c| elide(&c.label, 36))

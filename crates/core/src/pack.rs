@@ -116,14 +116,16 @@ pub const PACK_BACKENDS: &[Backend] = &[
         transport: Transport::Ble,
     },
     Backend {
-        kind: "none",
-        label: "No BMS: charge by pack voltage",
-        transport: Transport::Manual,
-    },
-    Backend {
         kind: "renogy",
         label: "Renogy (Bluetooth, BT-1/BT-2)",
         transport: Transport::Ble,
+    },
+    // Last: it is the fallback for a battery that cannot tell you anything,
+    // not something to land on by accident.
+    Backend {
+        kind: "none",
+        label: "No BMS: charge by pack voltage",
+        transport: Transport::Manual,
     },
 ];
 
