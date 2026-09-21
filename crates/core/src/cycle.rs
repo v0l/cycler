@@ -323,15 +323,12 @@ pub fn run(
             let from_load = load
                 .as_mut()
                 .and_then(|l| l.state().ok())
-                .filter(|l| l.on && l.volts > 0.0)
-                .map(|l| (l.volts, -l.amps));
-            let reading = from_load.or_else(|| {
-                charger
-                    .as_mut()
-                    .and_then(|c| c.measure().ok())
-                    .map(|s| (s.volts, s.amps))
+                .map(|l| (l.volts, l.amps, l.on));
+            let from_charger = charger.as_mut().and_then(|c| {
+                let on = c.output_on().ok().flatten().unwrap_or(false);
+                c.measure().ok().map(|s| (s.volts, s.amps, on))
             });
-            if let Some((v, a)) = reading {
+            if let Some((v, a)) = crate::pack::blind_reading(from_charger, from_load) {
                 pack.observe(v, a);
             }
         }

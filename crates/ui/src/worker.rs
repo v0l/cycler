@@ -323,11 +323,13 @@ fn run(
         // Same idea in the UI loop: the charger or load is the blind pack's
         // only instrument.
         if dev.pack.as_ref().map(|p| p.blind()).unwrap_or(false) {
-            let reading = load_state
-                .filter(|l| l.on && l.volts > 0.0)
-                .map(|l| (l.volts, -l.amps))
-                .or(update.charger);
-            if let (Some(p), Some((v, a))) = (dev.pack.as_mut(), reading) {
+            let from_load = load_state.map(|l| (l.volts, l.amps, l.on));
+            let from_charger = update
+                .charger
+                .map(|(v, a)| (v, a, update.charger_output.unwrap_or(false)));
+            if let (Some(p), Some((v, a))) =
+                (dev.pack.as_mut(), cycler_core::pack::blind_reading(from_charger, from_load))
+            {
                 p.observe(v, a);
             }
         }

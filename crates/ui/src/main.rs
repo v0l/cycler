@@ -383,6 +383,16 @@ impl eframe::App for App {
 impl App {
     fn battery_card(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.last.as_ref().and_then(|u| u.snapshot.clone());
+        let last_for_source = (
+            self.last
+                .as_ref()
+                .and_then(|u| u.load)
+                .map(|l| l.volts > 0.5),
+            self.last
+                .as_ref()
+                .and_then(|u| u.charger)
+                .map(|(v, _)| v > 0.5),
+        );
         let name = self
             .last
             .as_ref()
@@ -396,6 +406,11 @@ impl App {
                 theme::TRACE
             }
         });
+        let source = match last_for_source {
+            (Some(l), _) if l => "load",
+            (_, Some(c)) if c => "charger",
+            _ => "instrument",
+        };
         let ceiling = self.ceiling_mv;
         let measured = self
             .last
@@ -420,6 +435,31 @@ impl App {
                 });
             },
             |ui| match &snapshot {
+                Some(s) if !s.has_cells() => {
+                    // Nothing here comes from the battery: it is whatever the
+                    // charger or load can see at the terminals.
+                    theme::readouts(
+                        ui,
+                        &[
+                            ("pack", format!("{:.3} V", s.pack_v), theme::TRACE),
+                            ("current", format!("{:+.2} A", s.current_a), theme::TRACE),
+                            (
+                                "power",
+                                format!("{:+.1} W", s.pack_v * s.current_a),
+                                theme::TRACE,
+                            ),
+                        ],
+                    );
+                    theme::note(
+                        ui,
+                        format!(
+                            "No BMS: read by the {}. Limits are pack voltage only, and \
+                             nothing here knows what the cells are doing.",
+                            source
+                        ),
+                        theme::LEGEND,
+                    );
+                }
                 Some(s) => {
                     theme::readouts(
                         ui,
@@ -478,15 +518,6 @@ impl App {
                     if !s.alarms.is_empty() {
                         ui.add_space(2.0);
                         theme::note(ui, s.alarms.join(", "), theme::FAULT);
-                    }
-                    if !s.has_cells() {
-                        theme::note(
-                            ui,
-                            "No BMS: limits are pack voltage only, and nothing here \
-                             knows what the cells are doing.",
-                            theme::LEGEND,
-                        );
-                        return;
                     }
                     ui.add_space(2.0);
                     ui.separator();

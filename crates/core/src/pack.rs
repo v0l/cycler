@@ -151,6 +151,29 @@ pub trait Pack {
     }
 }
 
+/// Pick the instrument reading that actually describes the battery.
+///
+/// A supply measures its own output terminals, so it reads zero whenever its
+/// output relay is open, no matter what is wired to it. A load measures its
+/// input terminals, so it sees the battery the whole time it is connected.
+/// Either can supply the current, but only the one that is delivering or
+/// drawing knows it.
+pub fn blind_reading(
+    charger: Option<(f64, f64, bool)>,
+    load: Option<(f64, f64, bool)>,
+) -> Option<(f64, f64)> {
+    let volts = load
+        .map(|(v, _, _)| v)
+        .filter(|v| *v > 0.5)
+        .or_else(|| charger.map(|(v, _, _)| v).filter(|v| *v > 0.5))?;
+    let amps = match (charger, load) {
+        (_, Some((_, a, true))) => -a,
+        (Some((_, a, true)), _) => a,
+        _ => 0.0,
+    };
+    Some((volts, amps))
+}
+
 /// A battery that cannot report anything about itself. Its voltage and current
 /// are whatever the charger or load measures at the terminals.
 pub struct BlindPack {
@@ -399,6 +422,28 @@ mod tests {
         assert_eq!(s.spread_mv(), 69);
         assert_eq!(s.high_cell(), 1);
         assert_eq!(s.low_cell(), 0);
+    }
+
+    #[test]
+    fn a_blind_pack_is_read_by_whichever_instrument_can_see_it() {
+        // Supply off (reads its own open terminals as 0 V), load connected
+        // and idle: the load is the only one looking at the battery.
+        assert_eq!(
+            blind_reading(Some((0.0, 0.0, false)), Some((15.0, 0.0, false))),
+            Some((15.0, 0.0))
+        );
+        // Charging: the supply reads the battery and knows the current.
+        assert_eq!(
+            blind_reading(Some((14.4, 6.0, true)), Some((14.4, 0.0, false))),
+            Some((14.4, 6.0))
+        );
+        // Discharging: current leaves the pack, so it is negative to it.
+        assert_eq!(
+            blind_reading(Some((0.0, 0.0, false)), Some((12.8, 3.0, true))),
+            Some((12.8, -3.0))
+        );
+        // Nothing connected at all.
+        assert_eq!(blind_reading(Some((0.0, 0.0, false)), None), None);
     }
 
     #[test]
