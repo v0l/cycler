@@ -291,6 +291,44 @@ impl App {
     }
 
     /// The part of the charge config a running charge will still take.
+    /// The voltage to convert a setpoint through: what the pack is at now,
+    /// or what the profile says it should sit at when nothing is connected.
+    fn working_v(&self) -> f64 {
+        self.last
+            .as_ref()
+            .and_then(|u| u.snapshot.as_ref())
+            .map(|s| s.pack_v)
+            .filter(|v| *v > 1.0)
+            .unwrap_or_else(|| {
+                self.profile.series.max(1) as f64 * self.profile.cell().nominal_mv as f64 / 1000.0
+            })
+    }
+
+    /// Carry a discharge setpoint from one mode into another, so switching
+    /// from 2 A to power gives the watts that pack draws at 2 A rather than
+    /// 2 W. Current is the common currency: every mode converts through it.
+    fn convert_setpoint(&self, from: LoadMode, to: LoadMode, value: f64) -> f64 {
+        let v = self.working_v();
+        if to == LoadMode::Cv {
+            return v;
+        }
+        let amps = match from {
+            LoadMode::Cc => value,
+            LoadMode::Cp => value / v,
+            LoadMode::Cr if value > 0.0 => v / value,
+            // Constant voltage says nothing about current, so fall back to
+            // the C-rate the pack was set up with.
+            _ => self.capacity_ah() * self.discharge_c,
+        }
+        .max(0.01);
+        match to {
+            LoadMode::Cc => amps,
+            LoadMode::Cp => v * amps,
+            LoadMode::Cr => v / amps,
+            LoadMode::Cv => v,
+        }
+    }
+
     fn discharging(&self) -> bool {
         self.last
             .as_ref()
@@ -1868,6 +1906,7 @@ impl App {
                 // Everything under it can.
                 let running = self.discharging();
                 let before = self.load_tuning();
+                let mut picked = self.discharge_mode;
                 ui.add_enabled_ui(!running, |ui| {
                     egui::ComboBox::from_id_salt("load_mode")
                         .selected_text(self.discharge_mode.label())
@@ -1875,13 +1914,18 @@ impl App {
                         .show_ui(ui, |ui| {
                             for m in modes {
                                 ui.selectable_value(
-                                    &mut self.discharge_mode,
+                                    &mut picked,
                                     m,
                                     format!("{} ({})", m.label(), m.unit()),
                                 );
                             }
                         });
                 });
+                if picked != self.discharge_mode {
+                    self.discharge_a =
+                        self.convert_setpoint(self.discharge_mode, picked, self.discharge_a);
+                    self.discharge_mode = picked;
+                }
                 let (range, decimals) = match self.discharge_mode {
                     LoadMode::Cc => (0.1..=30.0, 2),
                     LoadMode::Cv => (1.0..=150.0, 1),
