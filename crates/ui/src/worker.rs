@@ -141,7 +141,13 @@ fn open(pack_spec: &str, charger_spec: &str, load_spec: Option<&str>) -> Devices
 
 /// Send only what changed: the OWON takes a quarter second per command and
 /// the DL24 is polled, so re-sending a setpoint every tick costs samples.
-fn apply(d: &mut Devices, want: Demand, have: Demand) -> Result<(), String> {
+/// How far the load's own voltage reading may differ from the pack's before
+/// they are clearly not connected to the same battery.
+fn mismatched(pack_v: f64, load_v: f64) -> bool {
+    load_v > 0.5 && pack_v > 0.5 && (pack_v - load_v).abs() > (pack_v * 0.1).max(2.0)
+}
+
+fn apply(d: &mut Devices, want: Demand, have: Demand, pack_v: f64) -> Result<(), String> {
     if let Some(c) = d.charger.as_mut() {
         if want.charger_on
             && (want.charger_a != have.charger_a || want.charger_v != have.charger_v)
@@ -160,6 +166,18 @@ fn apply(d: &mut Devices, want: Demand, have: Demand) -> Result<(), String> {
             && (want.load_value != have.load_value || want.load_mode != have.load_mode)
         {
             let _ = l.set_mode(want.load_mode, want.load_value);
+        }
+        if want.load_on && !have.load_on {
+            // The load measures its own terminals. If that does not match the
+            // pack, it is wired to something else, and discharging it would
+            // be a test of the wrong battery at best.
+            let load_v = l.state().map(|s| s.volts).unwrap_or(0.0);
+            if mismatched(pack_v, load_v) {
+                return Err(format!(
+                    "load sees {load_v:.2} V but the pack is {pack_v:.2} V: \
+                     check what the load is connected to"
+                ));
+            }
         }
         if want.load_on != have.load_on {
             let r = if want.load_on { l.start() } else { l.stop() };
@@ -319,7 +337,7 @@ fn run(
                 fails = 0;
                 if let Some(r) = runner.as_mut() {
                     let want = r.step_sample(&s, load_state, Instant::now());
-                    if let Err(e) = apply(&mut dev, want, demand) {
+                    if let Err(e) = apply(&mut dev, want, demand, s.pack_v) {
                         stop_all(&mut dev);
                         demand = Demand::default();
                         update.error = Some(e.clone());
@@ -379,5 +397,22 @@ fn run(
             stop_all(&mut dev);
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mismatched;
+
+    #[test]
+    fn a_load_on_another_battery_is_spotted() {
+        // 15 V on the load while the pack is 51 V: different battery.
+        assert!(mismatched(51.2, 15.0));
+        // Lead drop and meter error on the same battery: fine.
+        assert!(!mismatched(51.2, 51.0));
+        assert!(!mismatched(12.6, 12.4));
+        // Nothing connected yet says nothing either way.
+        assert!(!mismatched(51.2, 0.0));
+        assert!(!mismatched(0.0, 12.0));
     }
 }

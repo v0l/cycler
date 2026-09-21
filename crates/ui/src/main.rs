@@ -579,13 +579,34 @@ impl App {
         let last = self.last.clone();
         let load = last.as_ref().and_then(|u| u.load);
         let on = load.map(|l| l.on).unwrap_or(false);
+        let pack_v_hdr = last
+            .as_ref()
+            .and_then(|u| u.snapshot.as_ref())
+            .map(|s| s.pack_v)
+            .unwrap_or(0.0);
+        let mismatch = load
+            .map(|l| {
+                l.volts > 0.5
+                    && pack_v_hdr > 0.5
+                    && (pack_v_hdr - l.volts).abs() > (pack_v_hdr * 0.1).max(2.0)
+            })
+            .unwrap_or(false);
         theme::card(
             ui,
-            Some(if on { theme::OK } else { theme::ETCH }),
+            Some(if mismatch {
+                theme::FAULT
+            } else if on {
+                theme::OK
+            } else {
+                theme::ETCH
+            }),
             |ui| {
                 ui.label(theme::legend("load"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    theme::lamp(ui, if on { "load on" } else { "load off" }, on, false);
+                    if mismatch {
+                        theme::lamp(ui, "wrong battery?", true, true);
+                    }
+                    theme::lamp(ui, if on { "load on" } else { "load off" }, on, mismatch);
                 });
             },
             |ui| match load {
@@ -625,10 +646,22 @@ impl App {
                     );
                 }
                 Some(l) => {
+                    let pack_v = last
+                        .as_ref()
+                        .and_then(|u| u.snapshot.as_ref())
+                        .map(|s| s.pack_v)
+                        .unwrap_or(0.0);
+                    let wrong_battery = l.volts > 0.5
+                        && pack_v > 0.5
+                        && (pack_v - l.volts).abs() > (pack_v * 0.1).max(2.0);
                     theme::readouts(
                         ui,
                         &[
-                            ("in", format!("{:.2} V", l.volts), theme::TRACE),
+                            (
+                                "in",
+                                format!("{:.2} V", l.volts),
+                                if wrong_battery { theme::FAULT } else { theme::TRACE },
+                            ),
                             ("draw", format!("{:.2} A", l.amps), theme::TRACE),
                             ("power", format!("{:.1} W", l.watts), theme::TRACE),
                             ("drawn", format!("{:.3} Ah", l.amp_hours), theme::READOUT),
@@ -637,6 +670,17 @@ impl App {
                             ("run", format!("{:.0} min", l.runtime_s / 60.0), theme::VALUE),
                         ],
                     );
+                    if wrong_battery {
+                        theme::note(
+                            ui,
+                            format!(
+                                "Load sees {:.2} V, pack is {pack_v:.2} V. Different battery, \
+                                 or the leads are on something else.",
+                                l.volts
+                            ),
+                            theme::FAULT,
+                        );
+                    }
                     ui.label(
                         RichText::new(last.as_ref().map(|u| u.load_name.clone()).unwrap_or_default())
                             .size(10.5)

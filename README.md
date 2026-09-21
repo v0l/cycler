@@ -115,6 +115,9 @@ closed, and you should still be in the room.
   voltage rating and a lead in the wrong place all look the same from here,
   and none of them should sit there pretending to work. Float and balance
   holds are exempt, because a full pack legitimately takes nothing.
+- The load measures its own terminals, and a reading that disagrees with the
+  pack by more than 10% (or 2 V) means the leads are on something else. The
+  card turns red and a discharge refuses to start.
 - The charger's output state is read back from the supply, not assumed. If the
   supply says it is on while the controller wants it off, the card turns red.
   A supply found delivering with no plan running is switched off.
