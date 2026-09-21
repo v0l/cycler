@@ -143,11 +143,11 @@ cargo run -p cycler-ui
 
 Layout:
 
-- `crates/core` — devices, charge and discharge controllers, cycle planner,
+- `crates/core`: devices, charge and discharge controllers, cycle planner,
   discovery, CSV. The controllers are pure state machines with the clock
   injected, so the charge and discharge logic is testable without a battery.
-- `crates/cli` — batch runs and protocol tools.
-- `crates/ui` — egui front end; a worker thread owns the hardware so the UI
+- `crates/cli`: batch runs and protocol tools.
+- `crates/ui`: egui front end; a worker thread owns the hardware so the UI
   never blocks on a serial port, and the chart is drawn directly rather than
   through a plotting crate.
 
