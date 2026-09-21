@@ -5,6 +5,7 @@ mod worker;
 
 use cycler_core::charge::{Config, Mode};
 use cycler_core::cycle::Plan;
+use cycler_core::chemistry::{Chemistry, PackProfile};
 use cycler_core::device::LoadMode;
 use cycler_core::discharge;
 use cycler_core::device::{CHARGER_BACKENDS, LOAD_BACKENDS};
@@ -40,6 +41,9 @@ struct App {
     session: Option<Session>,
     log: Option<PathBuf>,
     remembered: Remembered,
+    profile: PackProfile,
+    series_detected: bool,
+    pack_floor_v: f64,
     pack_pick: Choice,
     charger_pick: Choice,
     load_pick: Choice,
@@ -71,6 +75,9 @@ impl App {
             session: None,
             log,
             remembered: Remembered::default(),
+            profile: PackProfile::default(),
+            series_detected: false,
+            pack_floor_v: PackProfile::default().floor_v(),
             pack_pick: Choice::new("battery", PACK_BACKENDS),
             charger_pick: Choice::new("charger", CHARGER_BACKENDS),
             load_pick: Choice::new("load", LOAD_BACKENDS),
@@ -96,6 +103,10 @@ impl App {
             repeat: 1,
         };
         app.remembered = Remembered::load();
+        if let Some(p) = app.remembered.profile {
+            app.profile = p;
+            app.apply_profile();
+        }
         app.remembered.apply([
             &mut app.pack_pick,
             &mut app.charger_pick,
@@ -106,6 +117,7 @@ impl App {
     }
 
     fn connect(&mut self) {
+        self.remembered.profile = Some(self.profile);
         self.remembered.remember([&self.pack_pick, &self.charger_pick, &self.load_pick]);
         // Wait for the old worker to release the ports before opening them
         // again, or the two sessions fight over the same serial device.
@@ -149,11 +161,21 @@ impl App {
         }
     }
 
+    /// Whether the connected pack reports cells at all.
+    fn blind(&self) -> bool {
+        self.last
+            .as_ref()
+            .and_then(|u| u.snapshot.as_ref())
+            .map(|s| !s.has_cells())
+            .unwrap_or(false)
+    }
+
     fn discharge_config(&self) -> discharge::Config {
         discharge::Config {
             mode: self.discharge_mode,
             setpoint: self.discharge_a,
             stop_at_soc: self.discharge_to_soc.then_some(self.target_soc as u8),
+            pack_floor_v: self.pack_floor_v,
             cell_floor_mv: self.floor_mv,
             ..Default::default()
         }
@@ -172,6 +194,21 @@ impl App {
         }
     }
 
+    /// Push the profile into the limits. One place to say what the battery is,
+    /// rather than typing the same numbers into five fields.
+    fn apply_profile(&mut self) {
+        let cell = self.profile.cell();
+        self.cv = self.profile.charge_v();
+        self.float_v = self.profile.float_v();
+        self.ceiling_mv = cell.ceiling_mv;
+        self.target_mv = cell.balance_mv;
+        self.floor_mv = cell.floor_mv;
+        self.pack_floor_v = self.profile.floor_v();
+        // A gentle test: fill and empty at a fifth of capacity.
+        self.max_current = self.profile.current_at_c(0.2);
+        self.discharge_a = self.profile.current_at_c(0.2);
+    }
+
     fn drain(&mut self) {
         let Some(session) = &self.session else { return };
         while let Ok(u) = session.rx.try_recv() {
@@ -186,6 +223,18 @@ impl App {
                     current_a: s.current_a,
                     cells_mv: s.cells_mv.clone(),
                 });
+            }
+            if let Some(s) = u.snapshot.as_ref() {
+                if s.has_cells() {
+                    self.profile.observe_cells(s.cells_mv.len());
+                    self.series_detected = true;
+                } else if !self.series_detected && s.pack_v > 1.0 {
+                    // No BMS: a resting voltage is the only clue to how many
+                    // cells are in there, and it is a guess until told
+                    // otherwise.
+                    self.profile.series = self.profile.chemistry.series_from_voltage(s.pack_v);
+                    self.series_detected = true;
+                }
             }
             self.error = u.error.clone();
             self.last = Some(u);
@@ -270,6 +319,7 @@ impl eframe::App for App {
             .show_inside(root, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 self.devices_card(ui);
+                self.profile_card(ui);
                 self.controls(ui);
                 self.discharge_card(ui);
                 self.plan_card(ui);
@@ -726,6 +776,71 @@ impl App {
         }
     }
 
+    fn profile_card(&mut self, ui: &mut egui::Ui) {
+        let blind = self
+            .last
+            .as_ref()
+            .and_then(|u| u.snapshot.as_ref())
+            .map(|s| !s.has_cells())
+            .unwrap_or(false);
+        let mut apply = false;
+        let capacity = self.profile.capacity_ah();
+        theme::card(
+            ui,
+            None,
+            |ui| {
+                ui.label(theme::legend("battery"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(theme::legend(format!("{capacity:.0} Ah")));
+                });
+            },
+            |ui| {
+                egui::ComboBox::from_id_salt("chemistry")
+                    .selected_text(self.profile.chemistry.label())
+                    .width(ui.available_width().max(0.0))
+                    .show_ui(ui, |ui| {
+                        for c in Chemistry::ALL {
+                            ui.selectable_value(&mut self.profile.chemistry, c, c.label());
+                        }
+                    });
+                let mut series = self.profile.series as f64;
+                let mut parallel = self.profile.parallel as f64;
+                if blind || !self.series_detected {
+                    field(ui, "series", &mut series, 1.0..=64.0, 1.0, 0);
+                    self.profile.series = series as u16;
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{}S", self.profile.series))
+                                .size(theme::VALUE_SIZE)
+                                .color(theme::VALUE),
+                        );
+                        ui.label(theme::legend("from the bms"));
+                    });
+                }
+                field(ui, "parallel", &mut parallel, 1.0..=32.0, 1.0, 0);
+                self.profile.parallel = parallel as u16;
+                field(ui, "cell Ah", &mut self.profile.cell_ah, 0.5..=1000.0, 1.0, 1);
+                theme::note(
+                    ui,
+                    format!(
+                        "{:.2} V charge, {:.2} V float, {:.2} V floor",
+                        self.profile.charge_v(),
+                        self.profile.float_v(),
+                        self.profile.floor_v()
+                    ),
+                    theme::LEGEND,
+                );
+                if ui.button(theme::value("Apply to limits")).clicked() {
+                    apply = true;
+                }
+            },
+        );
+        if apply {
+            self.apply_profile();
+        }
+    }
+
     fn controls(&mut self, ui: &mut egui::Ui) {
         // The side panel says what was asked for; the cards across the top say
         // what the hardware reports. Keep the two apart so a disagreement is
@@ -777,17 +892,25 @@ impl App {
                 );
                 ui.add_space(4.0);
                 field(ui, "max A", &mut self.max_current, 0.2..=10.0, 0.1, 2);
-                field(ui, "CV V", &mut self.cv, 40.0..=58.0, 0.1, 2);
+                field(ui, "CV V", &mut self.cv, 1.0..=150.0, 0.1, 2);
                 if self.mode == Mode::Auto {
-                    field(ui, "float V", &mut self.float_v, 40.0..=58.0, 0.1, 2);
+                    field(ui, "float V", &mut self.float_v, 1.0..=150.0, 0.1, 2);
                 }
-                let mut ceiling = self.ceiling_mv as f64;
-                field(ui, "ceiling mV", &mut ceiling, 3300.0..=3650.0, 5.0, 0);
-                self.ceiling_mv = ceiling as u16;
+                if self.blind() {
+                    theme::note(
+                        ui,
+                        "No BMS: the CV setpoint is the ceiling and float is where it holds.",
+                        theme::LEGEND,
+                    );
+                } else {
+                    let mut ceiling = self.ceiling_mv as f64;
+                    field(ui, "ceiling mV", &mut ceiling, 2000.0..=4300.0, 5.0, 0);
+                    self.ceiling_mv = ceiling as u16;
+                }
                 soc_stop(ui, "stop at soc", &mut self.charge_to_soc, &mut self.target_soc);
                 if self.mode == Mode::TopBalance {
                     let mut target = self.target_mv as f64;
-                    field(ui, "target mV", &mut target, 3300.0..=3600.0, 5.0, 0);
+                    field(ui, "target mV", &mut target, 2000.0..=4300.0, 5.0, 0);
                     self.target_mv = target as u16;
                     field(ui, "hold h", &mut self.hold_hours, 1.0..=72.0, 1.0, 0);
                 }
@@ -860,9 +983,13 @@ impl App {
                     0.1,
                     decimals,
                 );
-                let mut floor = self.floor_mv as f64;
-                field(ui, "floor mV", &mut floor, 2500.0..=3300.0, 10.0, 0);
-                self.floor_mv = floor as u16;
+                if self.blind() {
+                    field(ui, "floor V", &mut self.pack_floor_v, 1.0..=150.0, 0.1, 2);
+                } else {
+                    let mut floor = self.floor_mv as f64;
+                    field(ui, "floor mV", &mut floor, 1500.0..=3300.0, 10.0, 0);
+                    self.floor_mv = floor as u16;
+                }
                 soc_stop(
                     ui,
                     "stop at soc",

@@ -1,4 +1,5 @@
 pub mod charge;
+pub mod chemistry;
 pub mod cycle;
 pub mod discharge;
 pub mod discover;
@@ -8,6 +9,7 @@ pub mod log;
 pub mod pack;
 
 pub use charge::{Config as ChargeConfig, Controller, Mode, Phase, Reason};
+pub use chemistry::{CellLimits, Chemistry, PackProfile};
 pub use cycle::{Demand, Plan, Runner, Step, StepResult};
 pub use device::{Charger, Device, Discharger, Limits, Sample, open_charger, open_discharger};
 pub use discover::{Backend, Candidate, Transport};

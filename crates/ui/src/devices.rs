@@ -143,6 +143,10 @@ pub struct Remembered {
     pub specs: BTreeMap<String, String>,
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// What the battery is. Kept with the device selection because it is the
+    /// same kind of fact: a property of the rig, not of a run.
+    #[serde(default)]
+    pub profile: Option<cycler_core::chemistry::PackProfile>,
 }
 
 fn config_path() -> Option<PathBuf> {

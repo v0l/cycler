@@ -25,6 +25,9 @@ hand. A battery with no BMS at all works too, on voltage limits alone.
   storage at 50% rather than leaving it full or flat.
 - **Run cycle plans**: charge, rest, discharge counting amp-hours, rest,
   repeated, giving measured capacity against the pack's nameplate rating.
+- **Describe the pack once**: chemistry, series and parallel, and every
+  voltage and current limit follows. Series is taken from the BMS when there is
+  one, guessed from resting voltage when there is not.
 - **Charge a battery with no BMS** (lead-acid, a bare pack) on pack-voltage
   limits, using the charger as the voltmeter.
 - **Show the BMS's own alarms**, so a protection state is visible rather than
@@ -56,6 +59,9 @@ cycler devices
 ```bash
 # What is plugged in, and what each backend could open
 cycler devices
+
+# Work out the limits for a pack you know nothing about
+cycler profile --chemistry li-ion --series 13 --parallel 4 --cell-ah 3.5
 
 # Charge to full and stop, logging every sample
 cycler charge --mode auto --max-current 3 --log run.csv

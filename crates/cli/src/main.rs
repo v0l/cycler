@@ -11,6 +11,26 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// Chemistry, as a CLI argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ChemArg {
+    Lifepo4,
+    LiIon,
+    Lto,
+    LeadAcid,
+}
+
+impl From<ChemArg> for cycler_core::chemistry::Chemistry {
+    fn from(c: ChemArg) -> Self {
+        match c {
+            ChemArg::Lifepo4 => Self::LiFePo4,
+            ChemArg::LiIon => Self::LiIon,
+            ChemArg::Lto => Self::Lto,
+            ChemArg::LeadAcid => Self::LeadAcid,
+        }
+    }
+}
+
 /// Load regulation mode, as a CLI argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ModeArg {
@@ -149,6 +169,21 @@ enum Cmd {
         /// Try a battery of likely queries and report which ones answer.
         #[arg(long)]
         discover: bool,
+    },
+    /// Work out the limits for a pack: chemistry, series and parallel in,
+    /// every voltage and current out. Prints the flags to use.
+    Profile {
+        #[arg(long, value_enum, default_value_t = ChemArg::Lifepo4)]
+        chemistry: ChemArg,
+        #[arg(long, default_value_t = 15)]
+        series: u16,
+        #[arg(long, default_value_t = 1)]
+        parallel: u16,
+        #[arg(long, default_value_t = 50.0)]
+        cell_ah: f64,
+        /// C-rate for the suggested currents.
+        #[arg(long, default_value_t = 0.2)]
+        c_rate: f64,
     },
     /// List the backends and what each could open on this host.
     Devices,
@@ -499,6 +534,48 @@ fn main() -> Result<()> {
                 io.send(&command)?;
                 println!("sent {command}");
             }
+        }
+        Cmd::Profile {
+            chemistry,
+            series,
+            parallel,
+            cell_ah,
+            c_rate,
+        } => {
+            let p = cycler_core::chemistry::PackProfile {
+                chemistry: chemistry.into(),
+                series,
+                parallel,
+                cell_ah,
+            };
+            let cell = p.cell();
+            println!(
+                "{} {}S{}P, {:.0} Ah",
+                p.chemistry.label(),
+                p.series,
+                p.parallel,
+                p.capacity_ah()
+            );
+            println!(
+                "  cell    ceiling {} mV  float {} mV  floor {} mV  storage {} mV",
+                cell.ceiling_mv, cell.float_mv, cell.floor_mv, cell.storage_mv
+            );
+            println!(
+                "  pack    charge {:.2} V  float {:.2} V  floor {:.2} V  storage {:.2} V",
+                p.charge_v(),
+                p.float_v(),
+                p.floor_v(),
+                p.storage_v()
+            );
+            let i = p.current_at_c(c_rate);
+            println!("  current {i:.2} A at {c_rate}C");
+            println!();
+            println!(
+                "cycler cycle --cv {:.2} --ceiling-mv {} --max-current {i:.2} \\\n  --discharge-a {i:.2} --floor-mv {}",
+                p.charge_v(),
+                cell.ceiling_mv,
+                cell.floor_mv
+            );
         }
         Cmd::Devices => {
             use cycler_core::device::{CHARGER_BACKENDS, LOAD_BACKENDS};
