@@ -112,6 +112,8 @@ pub struct LoadState {
     pub volts: f64,
     pub amps: f64,
     pub watts: f64,
+    /// Resistance the load says it is presenting, where it reports one.
+    pub ohms: Option<f64>,
     pub amp_hours: f64,
     pub watt_hours: f64,
     pub temp_c: f64,

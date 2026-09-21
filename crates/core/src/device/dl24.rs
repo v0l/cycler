@@ -78,6 +78,9 @@ pub struct Counters {
     pub volts: f64,
     pub amps: f64,
     pub watts: f64,
+    /// What the load is seeing, in hundredths of an ohm. It reads 99999.91
+    /// with nothing flowing, which is the figure on the front panel.
+    pub ohms: f64,
     pub watt_hours: f64,
     pub amp_hours: f64,
     pub runtime_s: f64,
@@ -117,9 +120,10 @@ pub fn decode_counters(resp: &[u8]) -> Option<Counters> {
         volts: u16le(p, 4) as f64 / 1000.0,
         amps: u16le(p, 8) as f64 / 1000.0,
         watts: u16le(p, 12) as f64 / 1000.0,
+        ohms: u32le(p, 16) as f64 / 100.0,
         watt_hours: u32le(p, 20) as f64 / 1000.0,
         amp_hours: u32le(p, 24) as f64 / 1_000_000.0,
-        runtime_s: u32le(p, 28) as f64 / 48.0,
+        runtime_s: u32le(p, 28) as f64 / 12.0,
         mosfet_temp_c: u32le(p, 36) as f64 / 1000.0,
         load_on: p[48] != 0,
     })
@@ -376,6 +380,7 @@ impl Discharger for Dl24 {
             watts: c.watts,
             amp_hours: c.amp_hours,
             watt_hours: c.watt_hours,
+            ohms: Some(c.ohms),
             temp_c: c.mosfet_temp_c,
             runtime_s: c.runtime_s,
             on: c.load_on,
@@ -407,9 +412,13 @@ mod tests {
         let c = decode_counters(&hex(COUNTERS)).expect("counters");
         assert!((c.volts - 51.533).abs() < 1e-9);
         assert_eq!(c.amps, 0.0);
+        assert!((c.ohms - 99999.91).abs() < 1e-9);
         assert!((c.watt_hours - 69.883).abs() < 1e-9);
         assert!((c.amp_hours - 3.722786).abs() < 1e-9);
         assert!((c.mosfet_temp_c - 27.619).abs() < 1e-9);
+        // Against a running discharge: the field read 32768 with the front
+        // panel at 45:32 and 1.0922 Ah taken at 1.499 A, which is 2732 s.
+        assert!((c.runtime_s - 29000.0 / 12.0).abs() < 1e-9);
         assert!(!c.load_on);
     }
 

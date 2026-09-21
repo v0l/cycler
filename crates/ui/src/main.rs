@@ -1070,10 +1070,11 @@ impl App {
                         && (pack_v - l.volts).abs() > (pack_v * 0.1).max(2.0);
                     let demand = last.as_ref().map(|u| u.demand);
                     let mode = demand.map(|d| d.load_mode).unwrap_or(LoadMode::Cc);
-                    let ohms = if l.amps.abs() > 0.001 {
-                        format!("{:.2} R", l.volts / l.amps)
-                    } else {
-                        "open".into()
+                    let ohms = match l.ohms {
+                        Some(r) if r < 9999.0 => format!("{r:.2} R"),
+                        Some(_) => "open".into(),
+                        None if l.amps.abs() > 0.001 => format!("{:.2} R", l.volts / l.amps),
+                        None => "open".into(),
                     };
                     theme::readouts(
                         ui,
@@ -1089,7 +1090,7 @@ impl App {
                             ("drawn", format!("{:.4} Ah", l.amp_hours), theme::READOUT),
                             ("energy", format!("{:.2} Wh", l.watt_hours), theme::VALUE),
                             ("temp", format!("{:.0} C", l.temp_c), theme::VALUE),
-                            ("run", format!("{:.0} min", l.runtime_s / 60.0), theme::VALUE),
+                            ("run", hms(l.runtime_s), theme::VALUE),
                         ],
                     );
                     // What the load was told, beside what it says it is
@@ -2269,6 +2270,16 @@ fn soc_stop(ui: &mut egui::Ui, label: &str, on: &mut bool, value: &mut f64) {
             );
         }
     });
+}
+
+/// A runtime as the instrument's own screen writes it, because "45 min" and
+/// "46 min" are the same number to anyone comparing the two.
+fn hms(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    match s / 3600 {
+        0 => format!("{}:{:02}", s / 60, s % 60),
+        h => format!("{h}:{:02}:{:02}", (s / 60) % 60, s % 60),
+    }
 }
 
 /// One labelled numeric control. A slider collapses to nothing in a narrow

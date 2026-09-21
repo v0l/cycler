@@ -194,6 +194,7 @@ impl Discharger for OwonLoad {
             volts,
             amps,
             watts,
+            ohms: self.num("MEAS:RES?").ok(),
             amp_hours,
             watt_hours,
             temp_c: 0.0,
