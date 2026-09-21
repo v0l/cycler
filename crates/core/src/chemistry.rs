@@ -236,6 +236,11 @@ pub struct PackProfile {
     pub parallel: u16,
     /// Amp-hours of a single cell, so capacity is `cell_ah * parallel`.
     pub cell_ah: f64,
+    /// The ceiling this pack is actually charged to, when it is not the
+    /// chemistry's own. Charging a Li-ion cell to 4.15 V instead of 4.20 V
+    /// is a choice about its life, and once made it is what full means here.
+    #[serde(default)]
+    pub ceiling_mv: Option<u16>,
 }
 
 impl Default for PackProfile {
@@ -245,13 +250,25 @@ impl Default for PackProfile {
             series: 15,
             parallel: 1,
             cell_ah: 50.0,
+            ceiling_mv: None,
         }
     }
 }
 
 impl PackProfile {
     pub fn cell(&self) -> CellLimits {
-        self.chemistry.cell()
+        let mut c = self.chemistry.cell();
+        if let Some(mv) = self.ceiling_mv {
+            c.ceiling_mv = mv;
+        }
+        c
+    }
+
+    /// Record the charge setpoint in per-cell terms, so everything derived
+    /// from "full" follows the voltage the pack is really charged to.
+    pub fn set_charge_v(&mut self, volts: f64) {
+        let mv = (volts / self.series.max(1) as f64 * 1000.0).round();
+        self.ceiling_mv = (mv > 0.0).then_some(mv.clamp(0.0, 65_535.0) as u16);
     }
 
     pub fn capacity_ah(&self) -> f64 {
@@ -286,9 +303,23 @@ impl PackProfile {
 
     /// Estimated state of charge from terminal voltage. A guess, and worth
     /// treating as one: it is only honest at rest.
+    ///
+    /// Full means the ceiling this profile charges to, not the ceiling the
+    /// cell chemistry could take. A Li-ion cell charged to 4.15 V for the
+    /// sake of its life is about 94% of its rated capacity, and a gauge that
+    /// never passes 94 makes every control reading it useless: stopping at
+    /// 100% would never fire, and stopping at 50% would land somewhere else
+    /// than half way up the charge that was asked for.
     pub fn soc_from_pack_v(&self, volts: f64) -> f64 {
         let per_cell = volts / self.series.max(1) as f64 * 1000.0;
-        self.chemistry.soc_from_cell_mv(per_cell.clamp(0.0, 65_535.0) as u16)
+        let now = self
+            .chemistry
+            .soc_from_cell_mv(per_cell.clamp(0.0, 65_535.0) as u16);
+        let full = self.chemistry.soc_from_cell_mv(self.cell().ceiling_mv);
+        if full <= 0.0 {
+            return now;
+        }
+        (now / full * 100.0).clamp(0.0, 100.0)
     }
 
     /// Adopt the series count a BMS is reporting. It knows better than a
@@ -329,6 +360,8 @@ mod tests {
             series: 6,
             parallel: 1,
             cell_ah: 100.0,
+
+            ceiling_mv: None,
         };
         assert!((p.charge_v() - 14.4).abs() < 1e-9);
         assert!((p.float_v() - 13.602).abs() < 1e-3);
@@ -385,6 +418,22 @@ mod tests {
         assert!((li.soc_from_cell_mv(3760) - 50.0).abs() < 1e-9);
         // Half way between the 50% and 60% points.
         assert!((li.soc_from_cell_mv(3800) - 55.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn soc_is_full_at_the_ceiling_the_profile_charges_to() {
+        let p = PackProfile {
+            chemistry: Chemistry::LiIon,
+            series: 4,
+            ..Default::default()
+        };
+        // 4.15 V per cell is this profile's ceiling, so it is 100% of the
+        // charge asked for even though the cell would take 4.20 V.
+        assert_eq!(p.soc_from_pack_v(16.6).round(), 100.0);
+        assert!(p.soc_from_pack_v(17.0) <= 100.0);
+        // Half way up the curve to that ceiling, not half way to 4.20 V.
+        let half = p.soc_from_pack_v(4.0 * 3.76);
+        assert!((half - 53.0).abs() < 2.0, "{half}");
     }
 
     #[test]

@@ -615,6 +615,7 @@ fn main() -> Result<()> {
                 series,
                 parallel,
                 cell_ah,
+                ceiling_mv: None,
             };
             let cell = p.cell();
             println!(

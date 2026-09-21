@@ -1045,6 +1045,8 @@ mod tests {
             series: 6,
             parallel: 1,
             cell_ah: 100.0,
+
+            ceiling_mv: None,
         };
         let mut c = Controller::new(Config {
             mode: Mode::Standard,
@@ -1209,6 +1211,8 @@ mod tests {
                 series: 20,
                 parallel: 1,
                 cell_ah: 40.0,
+
+                ceiling_mv: None,
             })
         });
         let mut s = snap(&cells_at(2300, 20), 2.0);
@@ -1337,6 +1341,8 @@ mod tests {
             series: 6,
             parallel: 1,
             cell_ah: 100.0,
+
+            ceiling_mv: None,
         });
         assert!((lead.i_max - 10.0).abs() < 1e-9, "C/10 of 100 Ah");
         assert!((lead.i_term - 2.0).abs() < 1e-9, "2% of 100 Ah");
