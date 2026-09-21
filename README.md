@@ -102,10 +102,31 @@ The GUI picks devices from the same registry, remembers what you chose in
 `~/.config/cycler/devices.json`, and shows battery, charger and load as
 separate cards with a cell table and a history chart.
 
+## Disclaimer
+
+**Provided as is, without warranty of any kind.** See LICENSE.
+
+This software commands a power supply and an electronic load connected to a
+battery. Batteries store a lot of energy and fail badly: lithium cells can
+vent, catch fire or explode, lead-acid cells give off hydrogen and spill acid,
+and any pack can deliver enough current through a wrong connection to start a
+fire. Software cannot make that safe.
+
+Everything here depends on instruments and a BMS reporting the truth over
+cables that can fall out, and on limits that you set. A wrong series count, a
+wrong chemistry, a load on the wrong battery or a protocol quirk in a device
+this code has never met can all end with a pack being overcharged or
+over-discharged. Several of the backends have never run against hardware at
+all (see Status).
+
+You are responsible for your own wiring, fusing, limits and supervision. Do
+not leave a test unattended, and do not rely on this program as the only thing
+between a battery and a fault.
+
 ## Safety
 
-This program drives current into and out of a battery. It is built to fail
-closed, and you should still be in the room.
+The design assumes the program itself will fail, and tries to fail closed. It
+is not a substitute for being in the room.
 
 - Cell ceiling, cell floor, pack temperature and a hard limit above the ceiling
   all stop the output. With no BMS, the same limits are applied to pack
