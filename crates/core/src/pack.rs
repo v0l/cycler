@@ -50,6 +50,25 @@ impl Snapshot {
         self.cells_mv.iter().position(|c| *c == lo).unwrap_or(0)
     }
 
+    /// The first alarm the BMS is raising that is not on the ignore list.
+    ///
+    /// The pack's own protection is the most authoritative thing in the rig:
+    /// it is the only instrument wired to every cell, and it has already
+    /// decided something is wrong. Matching is a case-insensitive substring,
+    /// so `"balanc"` covers whatever each vendor calls it.
+    pub fn blocking_alarm(&self, ignored: &[String]) -> Option<String> {
+        self.alarms
+            .iter()
+            .find(|a| {
+                let a = a.to_lowercase();
+                !ignored.iter().any(|i| {
+                    let i = i.trim().to_lowercase();
+                    !i.is_empty() && a.contains(&i)
+                })
+            })
+            .cloned()
+    }
+
     /// What the pack is doing, from the sign of its own current.
     pub fn state_label(&self) -> &'static str {
         if self.current_a > 0.05 {
@@ -449,6 +468,35 @@ mod tests {
             cells_mv: cells.to_vec(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_alarm_the_bms_raises_is_a_reason_to_stop() {
+        let mut s = snap(&[3300]);
+        assert_eq!(s.blocking_alarm(&[]), None);
+        s.alarms = vec!["Cell over voltage".into()];
+        assert_eq!(s.blocking_alarm(&[]).as_deref(), Some("Cell over voltage"));
+    }
+
+    #[test]
+    fn an_ignored_alarm_is_matched_loosely() {
+        let mut s = snap(&[3300]);
+        s.alarms = vec!["Balancing active".into()];
+        // Vendors all name it differently, so match on a fragment.
+        assert_eq!(s.blocking_alarm(&["balanc".into()]), None);
+        // Ignoring one thing does not ignore the next.
+        s.alarms.push("Charge over current".into());
+        assert_eq!(
+            s.blocking_alarm(&["balanc".into()]).as_deref(),
+            Some("Charge over current")
+        );
+    }
+
+    #[test]
+    fn an_empty_ignore_entry_does_not_swallow_everything() {
+        let mut s = snap(&[3300]);
+        s.alarms = vec!["Over temperature".into()];
+        assert!(s.blocking_alarm(&["  ".into(), String::new()]).is_some());
     }
 
     #[test]

@@ -122,6 +122,35 @@ impl Chemistry {
         }
     }
 
+    /// The coldest a pack may be charged at, in Celsius.
+    ///
+    /// Below freezing, lithium plates metallic lithium on the anode instead
+    /// of intercalating. It is permanent, it is cumulative, and it ends in an
+    /// internal short. The cell will happily take the current while it
+    /// happens, so nothing but this check stops it.
+    pub fn charge_min_c(self) -> f64 {
+        match self {
+            Chemistry::LiFePo4 | Chemistry::LiIon => 0.0,
+            // LTO's anode sits well above lithium plating potential, which is
+            // the whole reason it exists.
+            Chemistry::Lto => -20.0,
+            // Lead-acid charges cold, but a frozen electrolyte does not, and
+            // a flat battery freezes around -10 C.
+            Chemistry::LeadAcid => -10.0,
+        }
+    }
+
+    /// The coldest a pack may be discharged at. Colder than it may be
+    /// charged: taking current out of a cold cell costs capacity and little
+    /// else.
+    pub fn discharge_min_c(self) -> f64 {
+        match self {
+            Chemistry::LiFePo4 | Chemistry::LiIon => -20.0,
+            Chemistry::Lto => -30.0,
+            Chemistry::LeadAcid => -20.0,
+        }
+    }
+
     /// Where absorption ends, as a fraction of capacity. Lithium is done at
     /// C/20; a lead-acid battery keeps taking a small current long after it
     /// is full, so its tail is quoted nearer 2% of capacity.
@@ -286,6 +315,14 @@ mod tests {
     }
 
     #[test]
+    fn lithium_may_not_be_charged_below_freezing() {
+        assert!((Chemistry::LiFePo4.charge_min_c() - 0.0).abs() < 1e-9);
+        assert!((Chemistry::LiIon.charge_min_c() - 0.0).abs() < 1e-9);
+        // LTO is the exception: its anode does not plate.
+        assert!(Chemistry::Lto.charge_min_c() < -10.0);
+    }
+
+    #[test]
     fn a_12v_lead_acid_battery_is_six_cells() {
         let p = PackProfile {
             chemistry: Chemistry::LeadAcid,
@@ -310,6 +347,8 @@ mod tests {
             assert!(c.default_discharge_c() > c.default_charge_c(), "{c:?}");
         }
         for c in Chemistry::ALL {
+            // Every chemistry tolerates more cold coming out than going in.
+            assert!(c.discharge_min_c() < c.charge_min_c(), "{c:?}");
             assert!(c.default_charge_c() > 0.0 && c.default_charge_c() <= 1.0);
             assert!(c.default_discharge_c() > 0.0 && c.default_discharge_c() <= 2.0);
             // Terminating has to be a small fraction of charging, or the

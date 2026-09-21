@@ -145,6 +145,20 @@ is not a substitute for being in the room.
   output, and a pack that does that repeatedly ends the run.
 - Absorption has a clock as well as a current: a pack that never terminates
   stops on `absorb_max` rather than charging all night.
+- The BMS's own alarms stop the run. It is the only instrument wired to every
+  cell and it has already decided something is wrong, so anything it flags
+  that is not on the ignore list ends the charge or discharge. The default
+  list holds one entry, `balanc`, because packs that report balancing as an
+  alarm would otherwise never finish an absorption.
+- The supply's hardware limits are armed before a run starts, at the absorb
+  voltage plus its margin and a quarter above the charge current. That is the
+  one protection that survives this program crashing, and it never widens a
+  limit already set on the panel.
+- A pack below its chemistry's cold limit is not charged: 0 C for LiFePO4 and
+  Li-ion, because a lithium cell below freezing plates metal on its anode
+  instead of charging and will take the current while it does it. LTO and
+  lead-acid go colder, and every chemistry may be discharged colder than it
+  may be charged.
 - Two consecutive failed BMS reads stop the output: no telemetry, no charging.
 - The BMS, the supply and the load all measure the same terminals, so they are
   cross-checked every poll. An instrument that is switched on and sees no

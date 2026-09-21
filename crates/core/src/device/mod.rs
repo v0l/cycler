@@ -59,6 +59,14 @@ pub trait Charger: Device {
         Ok(None)
     }
 
+    /// Clamp the supply's own hardware limits, so a crashed or wild
+    /// controller still cannot exceed them. This is the one protection that
+    /// survives this program dying: everything else here assumes the loop is
+    /// still running. Returns whether the supply took them.
+    fn arm(&mut self, _max_volts: f64, _max_amps: f64) -> Result<bool> {
+        Ok(false)
+    }
+
     fn set(&mut self, volts: f64, amps: f64) -> Result<()>;
     fn start(&mut self) -> Result<()>;
 }

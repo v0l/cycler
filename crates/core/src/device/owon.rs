@@ -162,6 +162,17 @@ impl Charger for OwonSpe {
         Ok(Some(self.info()?.regulation))
     }
 
+    /// Never widen what the supply was already set to allow: the panel
+    /// setting is someone's decision about this bench, and a config file
+    /// does not outrank it.
+    fn arm(&mut self, max_volts: f64, max_amps: f64) -> Result<bool> {
+        self.arm_limits(
+            max_volts.min(self.limits.max_volts),
+            max_amps.min(self.limits.max_amps),
+        )?;
+        Ok(true)
+    }
+
     fn set(&mut self, volts: f64, amps: f64) -> Result<()> {
         if volts > self.limits.max_volts || amps > self.limits.max_amps {
             bail!("{volts} V {amps} A exceeds device limits {:?}", self.limits);

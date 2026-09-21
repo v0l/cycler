@@ -261,6 +261,26 @@ fn run(
                 }
                 Ok(Command::Start(plan)) => {
                     stop_all(&mut dev);
+                    // Clamp the supply in hardware before anything is asked
+                    // of it, while there is still someone to tell.
+                    if let Some((v, a)) = plan.steps.iter().find_map(|s| match s {
+                        cycler_core::cycle::Step::Charge(c) => Some(c.hardware_limits()),
+                        _ => None,
+                    }) && let Some(c) = dev.charger.as_mut()
+                    {
+                        match c.arm(v, a) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                refused = Some(
+                                    "this supply has no hardware limits to arm".into(),
+                                )
+                            }
+                            Err(e) => {
+                                refused = Some(format!("could not arm the supply: {e:#}"));
+                                continue;
+                            }
+                        }
+                    }
                     demand = Demand::default();
                     let mut r = Runner::new(plan);
                     r.set_manual_load(

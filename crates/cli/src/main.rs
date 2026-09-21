@@ -433,11 +433,12 @@ fn main() -> Result<()> {
             log,
         } => {
             let mut pack = pack::open_pack(&pack_spec)?;
-            pack.set_profile(cycler_core::chemistry::PackProfile {
+            let profile = cycler_core::chemistry::PackProfile {
                 chemistry: chemistry.into(),
                 series,
                 ..Default::default()
-            });
+            };
+            pack.set_profile(profile);
             let mut load = cycler_core::open_discharger(&load_spec)?;
             println!("{} -> {}", pack.name(), load.name());
             let plan = cycler_core::cycle::Plan::discharge(cycler_core::discharge::Config {
@@ -446,6 +447,7 @@ fn main() -> Result<()> {
                 cell_floor_mv: floor_mv,
                 stop_at_soc,
                 interval: Duration::from_secs(interval),
+                temp_min_c: profile.chemistry.discharge_min_c(),
                 ..Default::default()
             });
             let results = run_plan(pack.as_mut(), None, Some(load.as_mut()), plan, interval, log)?;
@@ -499,6 +501,7 @@ fn main() -> Result<()> {
                 cycler_core::discharge::Config {
                     setpoint: discharge_a,
                     cell_floor_mv: floor_mv,
+                    temp_min_c: profile.chemistry.discharge_min_c(),
                     ..Default::default()
                 },
                 Duration::from_secs_f64(rest_min * 60.0),

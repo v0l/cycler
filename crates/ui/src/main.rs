@@ -68,6 +68,11 @@ struct App {
     absorb_hours: f64,
     float_v: f64,
     i_term: Option<f64>,
+    stop_on_alarm: bool,
+    /// Alarms to keep running through, as a comma separated list of
+    /// fragments. A pack that flags balancing all the way up would otherwise
+    /// never finish a charge.
+    alarm_ignore_list: String,
     charge_to_soc: bool,
     discharge_to_soc: bool,
     target_soc: f64,
@@ -107,6 +112,8 @@ impl App {
             absorb_hours: 6.0,
             float_v: 51.0,
             i_term: None,
+            stop_on_alarm: true,
+            alarm_ignore_list: "balanc".into(),
             charge_to_soc: false,
             discharge_to_soc: false,
             target_soc: 50.0,
@@ -193,6 +200,9 @@ impl App {
             v_recharge: self.float_v - 0.1 * self.profile.series.max(1) as f64,
             i_term: self.stop_current(),
             absorb_max: Duration::from_secs_f64(self.absorb_hours * 3600.0),
+            stop_on_alarm: self.stop_on_alarm,
+            alarms_ignored: self.alarms_ignored(),
+            temp_min_c: self.profile.chemistry.charge_min_c(),
             stop_at_soc: self.charge_to_soc.then_some(self.target_soc as u8),
             i_max: self.max_current,
             i_start: (self.max_current * 0.3).min(self.max_current),
@@ -201,6 +211,14 @@ impl App {
             // from a default built for a 15S lithium bench pack.
             ..Config::for_profile(&self.profile)
         }
+    }
+
+    fn alarms_ignored(&self) -> Vec<String> {
+        self.alarm_ignore_list
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 
     /// What the rig is doing, if anything: a plan owns the battery, the
@@ -304,6 +322,9 @@ impl App {
             stop_at_soc: self.discharge_to_soc.then_some(self.target_soc as u8),
             pack_floor_v: self.pack_floor_v,
             cell_floor_mv: self.floor_mv,
+            stop_on_alarm: self.stop_on_alarm,
+            alarms_ignored: self.alarms_ignored(),
+            temp_min_c: self.profile.chemistry.discharge_min_c(),
             ..Default::default()
         }
     }
@@ -635,7 +656,22 @@ impl App {
                     );
                     if !s.alarms.is_empty() {
                         ui.add_space(2.0);
-                        theme::note(ui, s.alarms.join(", "), theme::FAULT);
+                        let ignored = self.alarms_ignored();
+                        for a in &s.alarms {
+                            let skipped = ignored.iter().any(|i| {
+                                a.to_lowercase().contains(&i.trim().to_lowercase())
+                                    && !i.trim().is_empty()
+                            });
+                            theme::note(
+                                ui,
+                                if skipped {
+                                    format!("{a} (ignored)")
+                                } else {
+                                    format!("{a} - stops the run")
+                                },
+                                if skipped { theme::LEGEND } else { theme::FAULT },
+                            );
+                        }
                     }
                     ui.add_space(2.0);
                     ui.separator();
@@ -1236,6 +1272,26 @@ impl App {
                     });
                 }
                 soc_stop(ui, "stop at soc", &mut self.charge_to_soc, &mut self.target_soc);
+                if theme::toggle(ui, "stop on bms alarm", self.stop_on_alarm).clicked() {
+                    self.stop_on_alarm = !self.stop_on_alarm;
+                }
+                if self.stop_on_alarm {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::legend("except"));
+                        ui.add_sized(
+                            [150.0, 18.0],
+                            egui::TextEdit::singleline(&mut self.alarm_ignore_list)
+                                .hint_text("balanc, charging"),
+                        );
+                    });
+                } else {
+                    theme::note(
+                        ui,
+                        "The pack's own protection is the only instrument wired to every \
+                         cell. Charging through it is your call.",
+                        theme::FAULT,
+                    );
+                }
                 if self.mode != Mode::BulkOnly {
                     field(ui, "absorb h", &mut self.absorb_hours, 0.5..=24.0, 0.5, 1);
                     theme::note(

@@ -76,6 +76,17 @@ pub struct Config {
     /// "full" means to the automatic mode.
     pub stop_at_soc: Option<u8>,
     pub temp_max_c: f64,
+    /// Coldest the pack may be charged at. Below this a lithium cell plates
+    /// metal on its anode rather than charging, and takes the current while
+    /// it does it.
+    pub temp_min_c: f64,
+    /// Stop when the BMS raises an alarm of its own. It is the only
+    /// instrument wired to every cell, and it has already decided.
+    pub stop_on_alarm: bool,
+    /// Alarms to charge through anyway, matched as case-insensitive
+    /// substrings. A pack that flags "balancing" the whole way up the
+    /// absorption stage would otherwise never finish a charge.
+    pub alarms_ignored: Vec<String>,
     /// Give up if the output is on this long and the pack still reports no
     /// meaningful current: a breaker, a BMS that refuses charge, or a lead
     /// that is not where you think it is. Zero disables the check.
@@ -113,6 +124,9 @@ impl Default for Config {
             soc_target: 100,
             stop_at_soc: None,
             temp_max_c: 45.0,
+            temp_min_c: 0.0,
+            stop_on_alarm: true,
+            alarms_ignored: vec!["balanc".into()],
             stall_timeout: Duration::from_secs(90),
             stall_current_a: 0.05,
             hold_max: Duration::from_secs(48 * 3600),
@@ -122,6 +136,15 @@ impl Default for Config {
 }
 
 impl Config {
+    /// What to clamp the supply's own hardware limits to: just above what
+    /// this charge will ever ask for, so a controller that goes wrong still
+    /// cannot command more than the pack tolerates. Enough headroom that
+    /// normal regulation never touches them, because a supply that trips its
+    /// own limit stops mid-charge instead of tapering.
+    pub fn hardware_limits(&self) -> (f64, f64) {
+        (self.v_absorb + self.v_hard_margin, self.i_max * 1.25)
+    }
+
     /// Every limit derived from what the pack is, which is the only place
     /// they should come from: a chemistry, a series count and a capacity.
     pub fn for_profile(p: &PackProfile) -> Self {
@@ -140,6 +163,7 @@ impl Config {
             i_precharge: (capacity / 20.0).max(0.1),
             i_term: p.current_at_c(p.chemistry.default_termination_c()),
             maintain_float: p.chemistry == Chemistry::LeadAcid,
+            temp_min_c: p.chemistry.charge_min_c(),
             cell_ceiling_mv: cell.ceiling_mv,
             cell_hard_mv: cell.ceiling_mv + 50,
             cell_target_mv: cell.balance_mv,
@@ -228,6 +252,10 @@ pub enum Reason {
     PrechargeFailed,
     OverVoltage,
     OverTemp,
+    /// Too cold to charge without damaging the pack.
+    UnderTemp,
+    /// The pack's own protection is complaining.
+    PackAlarm,
     LostTelemetry,
 }
 
@@ -339,6 +367,22 @@ impl Controller {
 
         if s.temp_c > c.temp_max_c {
             return self.done(Reason::OverTemp, format!("{:.1} C over limit", s.temp_c));
+        }
+
+        if s.temp_c < c.temp_min_c {
+            return self.done(
+                Reason::UnderTemp,
+                format!(
+                    "{:.1} C is below the {:.1} C charge limit: warm the pack first",
+                    s.temp_c, c.temp_min_c
+                ),
+            );
+        }
+
+        if c.stop_on_alarm
+            && let Some(alarm) = s.blocking_alarm(&c.alarms_ignored)
+        {
+            return self.done(Reason::PackAlarm, format!("bms alarm: {alarm}"));
         }
 
         if let Some(target) = c.stop_at_soc
@@ -686,6 +730,12 @@ pub fn run(
     }
     let mut ctl = Controller::new(cfg.clone());
     charger.stop()?;
+    let (v_lim, a_lim) = cfg.hardware_limits();
+    match charger.arm(v_lim, a_lim) {
+        Ok(true) => println!("supply limited to {v_lim:.2} V {a_lim:.2} A in hardware"),
+        Ok(false) => eprintln!("warning: this supply has no hardware limits to arm"),
+        Err(e) => bail!("could not arm the supply limits: {e:#}"),
+    }
     charger.set(ctl.set_v, ctl.set_a)?;
 
     loop {
@@ -1141,6 +1191,55 @@ mod tests {
     }
 
     #[test]
+    fn a_cold_pack_is_not_charged() {
+        let mut c = Controller::new(cfg(Mode::Standard));
+        let mut s = snap(&cells_at(3300, 15), 2.0);
+        s.temp_c = -1.0;
+        c.step(&s, Instant::now());
+        assert_eq!(c.finished(), Some(Reason::UnderTemp));
+        assert!(!c.output_on);
+    }
+
+    #[test]
+    fn an_lto_pack_charges_in_the_cold() {
+        let mut c = Controller::new(Config {
+            mode: Mode::Standard,
+            ..Config::for_profile(&PackProfile {
+                chemistry: Chemistry::Lto,
+                series: 20,
+                parallel: 1,
+                cell_ah: 40.0,
+            })
+        });
+        let mut s = snap(&cells_at(2300, 20), 2.0);
+        s.temp_c = -10.0;
+        c.step(&s, Instant::now());
+        assert_eq!(c.phase, Phase::Bulk);
+        assert!(c.output_on);
+    }
+
+    #[test]
+    fn an_alarm_from_the_pack_stops_the_charge() {
+        let mut c = Controller::new(cfg(Mode::Standard));
+        let mut s = snap(&cells_at(3300, 15), 2.0);
+        s.alarms = vec!["Cell over voltage".into()];
+        c.step(&s, Instant::now());
+        assert_eq!(c.finished(), Some(Reason::PackAlarm));
+        assert!(!c.output_on);
+        assert!(c.note.contains("Cell over voltage"));
+    }
+
+    #[test]
+    fn a_pack_that_always_flags_balancing_still_charges() {
+        let mut c = Controller::new(cfg(Mode::Standard));
+        let mut s = snap(&cells_at(3300, 15), 2.0);
+        s.alarms = vec!["Balancing".into()];
+        c.step(&s, Instant::now());
+        assert_eq!(c.phase, Phase::Bulk);
+        assert!(c.output_on);
+    }
+
+    #[test]
     fn over_temperature_stops_everything() {
         let mut c = Controller::new(cfg(Mode::Standard));
         let mut s = snap(&cells_at(3300, 15), 2.0);
@@ -1211,6 +1310,18 @@ mod tests {
         let t = hold(&mut c, &blind(51.5, 1.0), t, 3 * MINUTE);
         assert_eq!(c.phase, Phase::Done(Reason::Terminated));
         let _ = t;
+    }
+
+    #[test]
+    fn the_hardware_limits_sit_above_what_the_charge_asks_for() {
+        let c = Config {
+            v_absorb: 51.5,
+            i_max: 3.0,
+            ..Default::default()
+        };
+        let (v, a) = c.hardware_limits();
+        assert!(v > c.v_absorb && v < c.v_absorb + 1.0);
+        assert!(a > c.i_max && a < c.i_max * 1.5);
     }
 
     #[test]

@@ -18,6 +18,13 @@ pub struct Config {
     /// full pack down to 50% and stop.
     pub stop_at_soc: Option<u8>,
     pub temp_max_c: f64,
+    /// Coldest the pack may be discharged at. Colder than it may be charged:
+    /// taking current out of a cold cell costs capacity, not anode.
+    pub temp_min_c: f64,
+    /// Stop when the BMS raises an alarm of its own.
+    pub stop_on_alarm: bool,
+    /// Alarms to keep going through, as case-insensitive substrings.
+    pub alarms_ignored: Vec<String>,
     /// Give up if the load is on this long and the pack reports no current
     /// leaving it: a load over its voltage rating, a breaker, or an
     /// uncontrolled load nobody switched on. Zero disables the check.
@@ -36,6 +43,9 @@ impl Default for Config {
             pack_floor_v: 45.0,
             stop_at_soc: None,
             temp_max_c: 50.0,
+            temp_min_c: -20.0,
+            stop_on_alarm: true,
+            alarms_ignored: vec!["balanc".into()],
             stall_timeout: Duration::from_secs(90),
             stall_current_a: 0.05,
             max_duration: Duration::from_secs(24 * 3600),
@@ -51,6 +61,10 @@ pub enum Reason {
     CellFloor,
     PackFloor,
     OverTemp,
+    /// Too cold to be drawing current from.
+    UnderTemp,
+    /// The pack's own protection is complaining.
+    PackAlarm,
     TimeLimit,
 }
 
@@ -129,7 +143,14 @@ impl Controller {
                 >= self.cfg.stall_timeout;
 
         let lo = s.low_mv();
-        let stop = if stalled {
+        let alarm = self
+            .cfg
+            .stop_on_alarm
+            .then(|| s.blocking_alarm(&self.cfg.alarms_ignored))
+            .flatten();
+        let stop = if alarm.is_some() {
+            Some(Reason::PackAlarm)
+        } else if stalled {
             Some(Reason::NoCurrent)
         } else if self.cfg.stop_at_soc.is_some_and(|t| s.soc <= t) {
             Some(Reason::SocTarget)
@@ -141,6 +162,8 @@ impl Controller {
             Some(Reason::PackFloor)
         } else if s.temp_c > self.cfg.temp_max_c {
             Some(Reason::OverTemp)
+        } else if s.temp_c < self.cfg.temp_min_c {
+            Some(Reason::UnderTemp)
         } else if now.saturating_duration_since(started) >= self.cfg.max_duration {
             Some(Reason::TimeLimit)
         } else {
@@ -151,24 +174,24 @@ impl Controller {
             Some(r) => {
                 self.load_on = false;
                 self.finished = Some(r);
+                let why = match &alarm {
+                    Some(a) => format!("{r:?} {a}"),
+                    None => format!("{r:?}"),
+                };
                 self.note = if !s.has_cells() {
                     format!(
-                        "{} {:.2} {}, {:.2} V, {:.3} Ah taken",
-                        self.cfg.mode.label(),
-                        self.cfg.setpoint,
-                        self.cfg.mode.unit(),
-                        s.pack_v,
-                        self.amp_hours
+                        "stopped on {why}: {:.2} V, {:.3} Ah taken",
+                        s.pack_v, self.amp_hours
                     )
                 } else if self.manual {
                     format!(
-                        "DISCONNECT THE LOAD: {r:?}, cell {} at {lo} mV, {:.3} Ah taken",
+                        "DISCONNECT THE LOAD: {why}, cell {} at {lo} mV, {:.3} Ah taken",
                         s.low_cell(),
                         self.amp_hours
                     )
                 } else {
                     format!(
-                        "stopped on {r:?}: cell {} at {lo} mV, {:.3} Ah taken",
+                        "stopped on {why}: cell {} at {lo} mV, {:.3} Ah taken",
                         s.low_cell(),
                         self.amp_hours
                     )
@@ -340,6 +363,40 @@ mod tests {
             Some(Reason::NoCurrent)
         );
         assert!(!c.load_on);
+    }
+
+    #[test]
+    fn a_pack_below_its_cold_limit_stops() {
+        let mut cold = snap(&[3200]);
+        cold.temp_c = -25.0;
+        let mut c = Controller::new(cfg());
+        assert_eq!(
+            c.step(&cold, None, Instant::now()),
+            Some(Reason::UnderTemp)
+        );
+        assert!(!c.load_on);
+    }
+
+    #[test]
+    fn an_alarm_from_the_pack_stops_the_discharge() {
+        let mut s = snap(&[3200]);
+        s.alarms = vec!["Discharge over current".into()];
+        let mut c = Controller::new(cfg());
+        assert_eq!(
+            c.step(&s, None, Instant::now()),
+            Some(Reason::PackAlarm)
+        );
+        assert!(!c.load_on);
+        assert!(c.note.contains("Discharge over current"), "{}", c.note);
+    }
+
+    #[test]
+    fn an_ignored_alarm_does_not_stop_the_discharge() {
+        let mut s = snap(&[3200]);
+        s.alarms = vec!["Balancing".into()];
+        let mut c = Controller::new(cfg());
+        assert_eq!(c.step(&s, None, Instant::now()), None);
+        assert!(c.load_on);
     }
 
     #[test]
