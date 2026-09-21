@@ -334,6 +334,12 @@ impl Discharger for Dl24 {
         Ok(())
     }
 
+    fn set_cutoff_volts(&mut self, volts: f64) -> Result<bool> {
+        Dl24::set_cutoff_volts(self, volts as f32)?;
+        std::thread::sleep(Duration::from_millis(160));
+        Ok(true)
+    }
+
     fn set_current(&mut self, amps: f64) -> Result<()> {
         if amps > self.max_amps {
             bail!("{amps:.2} A is over this load's {:.0} A rating", self.max_amps);

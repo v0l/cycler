@@ -21,6 +21,15 @@ impl Step {
         }
         }
     }
+
+    /// The step named in as few words as a rail segment can hold.
+    pub fn short_label(&self) -> String {
+        match self {
+            Step::Charge(_) => "charge".into(),
+            Step::Rest(d) => format!("rest {}", minutes(*d)),
+            Step::Discharge(_) => "discharge".into(),
+        }
+    }
 }
 
 fn minutes(d: Duration) -> String {
@@ -101,6 +110,9 @@ pub struct Demand {
     pub load_on: bool,
     pub load_mode: LoadMode,
     pub load_value: f64,
+    /// The floor the load itself should cut off at, matching the one the
+    /// controller watches.
+    pub load_cutoff_v: f64,
 }
 
 impl Default for Demand {
@@ -112,6 +124,7 @@ impl Default for Demand {
             load_on: false,
             load_mode: LoadMode::Cc,
             load_value: 0.0,
+            load_cutoff_v: 0.0,
         }
     }
 }
@@ -171,6 +184,20 @@ impl Runner {
         self.step
     }
 
+    /// What the plan will do, in order, short enough to sit in a rail.
+    pub fn step_labels(&self) -> Vec<String> {
+        self.plan.steps.iter().map(|s| s.short_label()).collect()
+    }
+
+    /// The stage a running charge is in, and how it was configured, so the
+    /// UI can show the sequence rather than the word "charging".
+    pub fn charge_stage(&self) -> Option<(charge::Mode, charge::Phase)> {
+        match self.active.as_ref() {
+            Some(Active::Charge(c)) => Some((c.cfg.mode, c.phase)),
+            _ => None,
+        }
+    }
+
     pub fn current_label(&self) -> String {
         self.plan
             .steps
@@ -199,6 +226,19 @@ impl Runner {
         }
         if let Some(Active::Charge(c)) = self.active.as_mut() {
             c.retune(t);
+        }
+    }
+
+    /// The same for a discharge: the step that is running and every one still
+    /// to come, so a change made during cycle two survives into cycle three.
+    pub fn retune_discharge(&mut self, t: &discharge::Tuning) {
+        for step in self.plan.steps.iter_mut() {
+            if let Step::Discharge(d) = step {
+                t.apply(d);
+            }
+        }
+        if let Some(Active::Discharge(d)) = self.active.as_mut() {
+            d.retune(t);
         }
     }
 
@@ -253,6 +293,7 @@ impl Runner {
                 demand.load_on = d.load_on;
                 demand.load_mode = d.cfg.mode;
                 demand.load_value = d.cfg.setpoint;
+                demand.load_cutoff_v = d.cfg.pack_floor_v;
                 self.note = d.note.clone();
                 if let Some(r) = d.finished() {
                     finished = Some((format!("{r:?}"), Some(d.amp_hours)));
@@ -386,6 +427,9 @@ pub fn run(
                 && (want.load_value != have.load_value || want.load_mode != have.load_mode)
             {
                 l.set_mode(want.load_mode, want.load_value)?;
+            }
+            if want.load_on && want.load_cutoff_v != have.load_cutoff_v {
+                l.set_cutoff_volts(want.load_cutoff_v)?;
             }
             if want.load_on != have.load_on {
                 if want.load_on {

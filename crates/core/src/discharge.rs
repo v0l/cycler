@@ -26,8 +26,9 @@ pub struct Config {
     /// Alarms to keep going through, as case-insensitive substrings.
     pub alarms_ignored: Vec<String>,
     /// Give up if the load is on this long and the pack reports no current
-    /// leaving it: a load over its voltage rating, a breaker, or an
-    /// uncontrolled load nobody switched on. Zero disables the check.
+    /// leaving it: a load over its voltage rating, a breaker, an
+    /// uncontrolled load nobody switched on, or an electronic load whose own
+    /// supply is unplugged. Zero disables the check.
     pub stall_timeout: Duration,
     pub stall_current_a: f64,
     pub max_duration: Duration,
@@ -51,6 +52,35 @@ impl Default for Config {
             max_duration: Duration::from_secs(24 * 3600),
             interval: Duration::from_secs(5),
         }
+    }
+}
+
+/// The settings a discharge will obey while it is already running. The mode
+/// is not among them: changing what the load holds constant part way through
+/// a capacity test makes the amp-hours measure two different tests.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tuning {
+    pub setpoint: f64,
+    pub cell_floor_mv: u16,
+    pub pack_floor_v: f64,
+    pub stop_at_soc: Option<u8>,
+}
+
+impl Tuning {
+    pub fn of(cfg: &Config) -> Self {
+        Self {
+            setpoint: cfg.setpoint,
+            cell_floor_mv: cfg.cell_floor_mv,
+            pack_floor_v: cfg.pack_floor_v,
+            stop_at_soc: cfg.stop_at_soc,
+        }
+    }
+
+    pub fn apply(&self, cfg: &mut Config) {
+        cfg.setpoint = self.setpoint;
+        cfg.cell_floor_mv = self.cell_floor_mv;
+        cfg.pack_floor_v = self.pack_floor_v;
+        cfg.stop_at_soc = self.stop_at_soc;
     }
 }
 
@@ -106,6 +136,10 @@ impl Controller {
 
     pub fn finished(&self) -> Option<Reason> {
         self.finished
+    }
+
+    pub fn retune(&mut self, t: &Tuning) {
+        t.apply(&mut self.cfg);
     }
 
     pub fn elapsed(&self, now: Instant) -> Duration {
@@ -174,9 +208,16 @@ impl Controller {
             Some(r) => {
                 self.load_on = false;
                 self.finished = Some(r);
-                let why = match &alarm {
-                    Some(a) => format!("{r:?} {a}"),
-                    None => format!("{r:?}"),
+                let why = match (&alarm, r) {
+                    (Some(a), _) => format!("{r:?} {a}"),
+                    // The instrument answered every command and sank
+                    // nothing, so the fault is on the bench, and the one
+                    // that looks least like a fault is a load with no
+                    // supply of its own.
+                    (None, Reason::NoCurrent) => {
+                        "NoCurrent (leads, rating, or the load's own supply)".into()
+                    }
+                    (None, _) => format!("{r:?}"),
                 };
                 self.note = if !s.has_cells() {
                     format!(
@@ -249,6 +290,24 @@ mod tests {
             pack_floor_v: 1.0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_running_discharge_takes_a_new_floor_and_stops_on_it() {
+        let mut c = Controller::new(cfg());
+        let t = Instant::now();
+        assert_eq!(c.step(&snap(&[3200, 3300, 3250]), None, t), None);
+        c.retune(&Tuning {
+            setpoint: 1.0,
+            cell_floor_mv: 3250,
+            pack_floor_v: 1.0,
+            stop_at_soc: None,
+        });
+        assert_eq!(c.cfg.setpoint, 1.0);
+        assert_eq!(
+            c.step(&snap(&[3200, 3300, 3250]), None, t + Duration::from_secs(5)),
+            Some(Reason::CellFloor)
+        );
     }
 
     #[test]

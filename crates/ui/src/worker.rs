@@ -13,6 +13,7 @@ pub enum Command {
     Start(Plan),
     /// Change the currents and clocks of a charge that is already running.
     Tune(cycler_core::charge::Tuning),
+    TuneLoad(cycler_core::discharge::Tuning),
     Stop,
     Quit,
 }
@@ -31,6 +32,11 @@ pub struct Update {
     pub cycle: usize,
     pub step_label: String,
     pub step_index: usize,
+    /// What the running plan will do, in order.
+    pub plan_labels: Vec<String>,
+    /// Which stage of a charge is running, and the mode it was started in,
+    /// which decides what stages the sequence has at all.
+    pub charge_stage: Option<(cycler_core::charge::Mode, cycler_core::charge::Phase)>,
     pub results: Vec<StepResult>,
     pub measured_ah: Option<f64>,
     pub error: Option<String>,
@@ -179,6 +185,9 @@ fn apply(d: &mut Devices, want: Demand, have: Demand, pack_v: f64) -> Result<(),
         {
             let _ = l.set_mode(want.load_mode, want.load_value);
         }
+        if want.load_on && want.load_cutoff_v != have.load_cutoff_v {
+            let _ = l.set_cutoff_volts(want.load_cutoff_v);
+        }
         if want.load_on && !have.load_on {
             // The load measures its own terminals. If that does not match the
             // pack, it is wired to something else, and discharging it would
@@ -298,6 +307,11 @@ fn run(
                         r.retune_charge(&t);
                     }
                 }
+                Ok(Command::TuneLoad(t)) => {
+                    if let Some(r) = runner.as_mut() {
+                        r.retune_discharge(&t);
+                    }
+                }
                 Ok(Command::Stop) => {
                     stop_all(&mut dev);
                     demand = Demand::default();
@@ -332,6 +346,8 @@ fn run(
             cycle: 0,
             step_label: String::new(),
             step_index: 0,
+            plan_labels: runner.as_ref().map(|r| r.step_labels()).unwrap_or_default(),
+            charge_stage: None,
             results: Vec::new(),
             measured_ah: None,
             error: refused
@@ -459,6 +475,7 @@ fn run(
                     update.cycle = r.cycle();
                     update.step_label = r.current_label();
                     update.step_index = r.step_index();
+                    update.charge_stage = r.charge_stage();
                     update.results = r.results.clone();
                     update.measured_ah = r.measured_ah();
                     if r.done() {

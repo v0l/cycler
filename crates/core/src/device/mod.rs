@@ -143,6 +143,13 @@ pub trait Discharger: Device {
 
     fn set_current(&mut self, amps: f64) -> Result<()>;
     fn start(&mut self) -> Result<()>;
+    /// Program the load's own cutoff voltage, where it has one. It is set to
+    /// the same floor the controller is watching, so a controller that stops
+    /// polling cannot take the pack below it. A load without one says so by
+    /// answering false, and stays the controller's responsibility alone.
+    fn set_cutoff_volts(&mut self, _volts: f64) -> Result<bool> {
+        Ok(false)
+    }
     /// Amp-hours counted by the device itself, when it keeps its own total.
     fn amp_hours(&mut self) -> Result<Option<f64>> {
         Ok(None)
