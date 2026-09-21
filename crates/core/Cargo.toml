@@ -1,0 +1,17 @@
+[package]
+name = "cycler-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+battery_control.workspace = true
+chrono.workspace = true
+clap.workspace = true
+nusb.workspace = true
+serde.workspace = true
+serialport.workspace = true
+signal-hook = "0.4.4"
+tokio.workspace = true

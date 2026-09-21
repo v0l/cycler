@@ -1,0 +1,15 @@
+[package]
+name = "cycler-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cycler"
+path = "src/main.rs"
+
+[dependencies]
+cycler-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true

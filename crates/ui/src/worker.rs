@@ -1,0 +1,383 @@
+use cycler_core::cycle::{Demand, Plan, Runner, StepResult};
+use cycler_core::device::LoadState;
+use cycler_core::log::{CsvLog, Row};
+use cycler_core::pack::Snapshot;
+use cycler_core::{Charger, Discharger, Pack, open_charger, open_discharger, open_pack};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
+use std::time::{Duration, Instant};
+
+pub enum Command {
+    Start(Plan),
+    Stop,
+    Quit,
+}
+
+#[derive(Clone)]
+pub struct Update {
+    pub at: Instant,
+    pub snapshot: Option<Snapshot>,
+    pub demand: Demand,
+    pub note: String,
+    pub running: bool,
+    /// How many steps the running plan has. A plain charge is a one-step plan
+    /// internally, and should not look like a cycle test in the UI.
+    pub plan_steps: usize,
+    pub plan_repeat: usize,
+    pub cycle: usize,
+    pub step_label: String,
+    pub step_index: usize,
+    pub results: Vec<StepResult>,
+    pub measured_ah: Option<f64>,
+    pub error: Option<String>,
+    pub pack_name: String,
+    pub charger_name: String,
+    pub charger: Option<(f64, f64)>,
+    /// What the supply says it is doing, not what we asked it to do.
+    pub charger_output: Option<bool>,
+    pub charger_regulation: Option<cycler_core::device::Regulation>,
+    pub load_name: String,
+    pub load: Option<LoadState>,
+    pub load_manual: bool,
+    pub load_modes: Vec<cycler_core::device::LoadMode>,
+}
+
+pub struct Session {
+    pub tx: Sender<Command>,
+    pub rx: Receiver<Update>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Session {
+    /// Stop the hardware and wait for the worker to let go of the ports. A
+    /// reconnect that does not wait races the old session for the same serial
+    /// device, and whichever loses comes back as "no battery".
+    pub fn close(mut self) {
+        let _ = self.tx.send(Command::Quit);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Session {
+    pub fn spawn(
+        pack_spec: String,
+        charger_spec: String,
+        load_spec: Option<String>,
+        log: Option<PathBuf>,
+        poll: Duration,
+    ) -> Self {
+        let (tx, cmd_rx) = channel::<Command>();
+        let (up_tx, rx) = channel::<Update>();
+        let handle = std::thread::spawn(move || {
+            run(pack_spec, charger_spec, load_spec, log, poll, cmd_rx, up_tx)
+        });
+        Self {
+            tx,
+            rx,
+            handle: Some(handle),
+        }
+    }
+}
+
+struct Devices {
+    pack: Option<Box<dyn Pack>>,
+    charger: Option<Box<dyn Charger>>,
+    load: Option<Box<dyn Discharger>>,
+    pack_name: String,
+    charger_name: String,
+    load_name: String,
+    errors: Vec<String>,
+}
+
+fn open(pack_spec: &str, charger_spec: &str, load_spec: Option<&str>) -> Devices {
+    let mut d = Devices {
+        pack: None,
+        charger: None,
+        load: None,
+        pack_name: String::new(),
+        charger_name: String::new(),
+        load_name: String::new(),
+        errors: Vec::new(),
+    };
+    match open_pack(pack_spec) {
+        Ok(p) => {
+            d.pack_name = p.name();
+            d.pack = Some(p);
+        }
+        Err(e) => d.errors.push(format!("battery: {e:#}")),
+    }
+    match open_charger(charger_spec) {
+        Ok(mut c) => {
+            // A supply left delivering by a killed process is the one state
+            // that must never survive a reconnect.
+            let mut on = c.output_on().ok().flatten();
+            if on.is_none() {
+                std::thread::sleep(Duration::from_millis(300));
+                on = c.output_on().ok().flatten();
+            }
+            if on == Some(true) {
+                let _ = c.stop();
+                d.errors
+                    .push("charger was left on; output forced off".into());
+            }
+            d.charger_name = c.name();
+            d.charger = Some(c);
+        }
+        Err(e) => d.errors.push(format!("charger: {e:#}")),
+    }
+    if let Some(spec) = load_spec {
+        match open_discharger(spec) {
+            Ok(l) => {
+                d.load_name = l.name();
+                d.load = Some(l);
+            }
+            Err(e) => d.errors.push(format!("load: {e:#}")),
+        }
+    }
+    d
+}
+
+/// Send only what changed: the OWON takes a quarter second per command and
+/// the DL24 is polled, so re-sending a setpoint every tick costs samples.
+fn apply(d: &mut Devices, want: Demand, have: Demand) -> Result<(), String> {
+    if let Some(c) = d.charger.as_mut() {
+        if want.charger_on
+            && (want.charger_a != have.charger_a || want.charger_v != have.charger_v)
+        {
+            let _ = c.set(want.charger_v, want.charger_a);
+        }
+        if want.charger_on != have.charger_on {
+            let _ = if want.charger_on { c.start() } else { c.stop() };
+        }
+    }
+    if let Some(l) = d.load.as_mut() {
+        if !l.controllable() {
+            return Ok(());
+        }
+        if want.load_on
+            && (want.load_value != have.load_value || want.load_mode != have.load_mode)
+        {
+            let _ = l.set_mode(want.load_mode, want.load_value);
+        }
+        if want.load_on != have.load_on {
+            let r = if want.load_on { l.start() } else { l.stop() };
+            if let Err(e) = r {
+                return Err(format!("{e:#}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stop_all(d: &mut Devices) {
+    if let Some(c) = d.charger.as_mut() {
+        let _ = c.stop();
+    }
+    if let Some(l) = d.load.as_mut() {
+        let _ = l.stop();
+    }
+}
+
+fn run(
+    pack_spec: String,
+    charger_spec: String,
+    load_spec: Option<String>,
+    log_path: Option<PathBuf>,
+    poll: Duration,
+    cmd_rx: Receiver<Command>,
+    up_tx: Sender<Update>,
+) {
+    let mut dev = open(&pack_spec, &charger_spec, load_spec.as_deref());
+    let mut runner: Option<Runner> = None;
+    let mut demand = Demand::default();
+    let mut fails = 0u32;
+    let mut log = log_path.and_then(|p| match CsvLog::create(&p) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            dev.errors.push(format!("log: {e:#}"));
+            None
+        }
+    });
+
+    let mut wait = Duration::from_millis(0);
+    loop {
+        // Drain commands, sleeping out the poll interval here rather than at
+        // the end of the loop: a Quit then takes effect immediately instead of
+        // up to one poll later, which is what makes reconnects deterministic.
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let cmd = if left.is_zero() {
+                cmd_rx.try_recv().map_err(|e| match e {
+                    TryRecvError::Empty => RecvTimeoutError::Timeout,
+                    TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+                })
+            } else {
+                cmd_rx.recv_timeout(left)
+            };
+            match cmd {
+                Ok(Command::Start(plan)) => {
+                    stop_all(&mut dev);
+                    demand = Demand::default();
+                    let mut r = Runner::new(plan);
+                    r.set_manual_load(
+                        dev.load.as_ref().map(|l| !l.controllable()).unwrap_or(false),
+                    );
+                    runner = Some(r);
+                }
+                Ok(Command::Stop) => {
+                    stop_all(&mut dev);
+                    demand = Demand::default();
+                    runner = None;
+                }
+                Ok(Command::Quit) | Err(RecvTimeoutError::Disconnected) => {
+                    stop_all(&mut dev);
+                    return;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                }
+            }
+        }
+        wait = poll;
+
+        if cycler_core::interrupt::requested() {
+            stop_all(&mut dev);
+            return;
+        }
+        let load_state = dev.load.as_mut().and_then(|l| l.state().ok());
+        let mut update = Update {
+            at: Instant::now(),
+            snapshot: None,
+            demand,
+            note: String::new(),
+            running: runner.is_some(),
+            plan_steps: runner.as_ref().map(|r| r.plan().steps.len()).unwrap_or(0),
+            plan_repeat: runner.as_ref().map(|r| r.plan().repeat).unwrap_or(0),
+            cycle: 0,
+            step_label: String::new(),
+            step_index: 0,
+            results: Vec::new(),
+            measured_ah: None,
+            error: (!dev.errors.is_empty()).then(|| dev.errors.join("; ")),
+            pack_name: dev.pack_name.clone(),
+            charger_name: dev.charger_name.clone(),
+            charger: dev
+                .charger
+                .as_mut()
+                .and_then(|c| c.measure().ok())
+                .map(|s| (s.volts, s.amps)),
+            charger_output: dev.charger.as_mut().and_then(|c| c.output_on().ok().flatten()),
+            charger_regulation: dev.charger.as_mut().and_then(|c| c.regulation().ok().flatten()),
+            load_name: dev.load_name.clone(),
+            load: load_state,
+            load_manual: dev.load.as_ref().map(|l| !l.controllable()).unwrap_or(false),
+            load_modes: dev.load.as_ref().map(|l| l.modes().to_vec()).unwrap_or_default(),
+        };
+
+        // Nothing is running, so nothing may be delivering. This catches a
+        // supply left on by a killed session, or switched on at the panel,
+        // every poll rather than only at startup.
+        if runner.is_none() {
+            if update.charger_output == Some(true) {
+                if let Some(c) = dev.charger.as_mut() {
+                    let _ = c.stop();
+                }
+                update.charger_output = Some(false);
+                update.note = "charger was on with no plan running: forced off".into();
+                update.error = Some(update.note.clone());
+            }
+            if update.load.map(|l| l.on).unwrap_or(false)
+                && dev.load.as_ref().map(|l| l.controllable()).unwrap_or(false)
+            {
+                if let Some(l) = dev.load.as_mut() {
+                    let _ = l.stop();
+                }
+                update.note = "load was on with no plan running: forced off".into();
+                update.error = Some(update.note.clone());
+            }
+        }
+
+        // Same idea in the UI loop: the charger or load is the blind pack's
+        // only instrument.
+        if dev.pack.as_ref().map(|p| p.blind()).unwrap_or(false) {
+            let reading = load_state
+                .filter(|l| l.on && l.volts > 0.0)
+                .map(|l| (l.volts, -l.amps))
+                .or(update.charger);
+            if let (Some(p), Some((v, a))) = (dev.pack.as_mut(), reading) {
+                p.observe(v, a);
+            }
+        }
+
+        match dev.pack.as_mut().map(|p| p.read()) {
+            Some(Ok(s)) => {
+                fails = 0;
+                if let Some(r) = runner.as_mut() {
+                    let want = r.step_sample(&s, load_state, Instant::now());
+                    if let Err(e) = apply(&mut dev, want, demand) {
+                        stop_all(&mut dev);
+                        demand = Demand::default();
+                        update.error = Some(e.clone());
+                        update.note = format!("stopped: {e}");
+                        update.running = false;
+                        runner = None;
+                        update.snapshot = Some(s);
+                        let _ = up_tx.send(update);
+                        continue;
+                    }
+                    demand = want;
+                    update.demand = want;
+                    update.note = r.note.clone();
+                    update.cycle = r.cycle();
+                    update.step_label = r.current_label();
+                    update.step_index = r.step_index();
+                    update.results = r.results.clone();
+                    update.measured_ah = r.measured_ah();
+                    if r.done() {
+                        stop_all(&mut dev);
+                        demand = Demand::default();
+                        update.running = false;
+                        runner = None;
+                    }
+                }
+                update.snapshot = Some(s);
+            }
+            Some(Err(e)) => {
+                fails += 1;
+                update.error = Some(format!("{e:#}"));
+                if fails >= 2 && runner.is_some() {
+                    stop_all(&mut dev);
+                    demand = Demand::default();
+                    runner = None;
+                    update.running = false;
+                    update.note = "stopped: lost BMS telemetry".into();
+                }
+            }
+            None => update.error = Some("no battery".into()),
+        }
+
+        if let (Some(l), Some(s)) = (log.as_mut(), update.snapshot.as_ref())
+            && let Err(e) = l.write(
+                s,
+                &Row {
+                    set_a: update.demand.charger_a,
+                    output_on: update.demand.charger_on,
+                    note: &update.note,
+                    load: update.load,
+                },
+            )
+        {
+            eprintln!("log write: {e:#}");
+        }
+
+        if up_tx.send(update).is_err() {
+            stop_all(&mut dev);
+            return;
+        }
+    }
+}
