@@ -43,6 +43,9 @@ struct App {
     remembered: Remembered,
     profile: PackProfile,
     series_detected: bool,
+    /// Test rate as a fraction of capacity: 0.2C fills or empties a pack in
+    /// about five hours.
+    c_rate: f64,
     pack_floor_v: f64,
     pack_pick: Choice,
     charger_pick: Choice,
@@ -77,6 +80,7 @@ impl App {
             remembered: Remembered::default(),
             profile: PackProfile::default(),
             series_detected: false,
+            c_rate: 0.2,
             pack_floor_v: PackProfile::default().floor_v(),
             pack_pick: Choice::new("battery", PACK_BACKENDS),
             charger_pick: Choice::new("charger", CHARGER_BACKENDS),
@@ -103,6 +107,9 @@ impl App {
             repeat: 1,
         };
         app.remembered = Remembered::load();
+        if let Some(r) = app.remembered.c_rate.filter(|r| *r > 0.0) {
+            app.c_rate = r;
+        }
         if let Some(p) = app.remembered.profile {
             app.profile = p;
             app.apply_profile();
@@ -118,6 +125,7 @@ impl App {
 
     fn connect(&mut self) {
         self.remembered.profile = Some(self.profile);
+        self.remembered.c_rate = Some(self.c_rate);
         self.remembered.remember([&self.pack_pick, &self.charger_pick, &self.load_pick]);
         // Wait for the old worker to release the ports before opening them
         // again, or the two sessions fight over the same serial device.
@@ -217,9 +225,9 @@ impl App {
         self.floor_mv = cell.floor_mv;
         self.pack_floor_v = self.profile.floor_v();
         // A gentle test: fill and empty at a fifth of capacity.
-        let gentle = (self.capacity_ah() * 0.2).max(0.1);
-        self.max_current = gentle;
-        self.discharge_a = gentle;
+        let rate = (self.capacity_ah() * self.c_rate).max(0.1);
+        self.max_current = rate;
+        self.discharge_a = rate;
     }
 
     fn drain(&mut self) {
@@ -931,13 +939,16 @@ impl App {
                     self.profile.parallel = parallel as u16;
                     field(ui, "cell Ah", &mut self.profile.cell_ah, 0.5..=1000.0, 1.0, 1);
                 }
+                field(ui, "C rate", &mut self.c_rate, 0.01..=3.0, 0.05, 2);
                 theme::note(
                     ui,
                     format!(
-                        "{:.2} V charge, {:.2} V float, {:.2} V floor",
+                        "{:.2} V charge, {:.2} V float, {:.2} V floor, {:.2} A at {:.2}C",
                         self.profile.charge_v(),
                         self.profile.float_v(),
-                        self.profile.floor_v()
+                        self.profile.floor_v(),
+                        (capacity * self.c_rate).max(0.1),
+                        self.c_rate
                     ),
                     theme::LEGEND,
                 );
