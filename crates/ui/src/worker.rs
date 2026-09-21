@@ -334,10 +334,11 @@ fn run(
             let from_charger = update
                 .charger
                 .map(|(v, a)| (v, a, update.charger_output.unwrap_or(false)));
-            if let (Some(p), Some((v, a))) =
-                (dev.pack.as_mut(), cycler_core::pack::blind_reading(from_charger, from_load))
-            {
-                p.observe(v, a);
+            if let Some(p) = dev.pack.as_mut() {
+                match cycler_core::pack::blind_reading(from_charger, from_load) {
+                    Some((v, a)) => p.observe(v, a),
+                    None => p.lost(),
+                }
             }
         }
 

@@ -41,6 +41,9 @@ struct App {
     session: Option<Session>,
     log: Option<PathBuf>,
     remembered: Remembered,
+    /// The specs the running session was opened with, so a changed dropdown
+    /// can be told apart from a connected device.
+    active: Vec<String>,
     profile: PackProfile,
     series_detected: bool,
     /// Test rate as a fraction of capacity: 0.2C fills or empties a pack in
@@ -78,6 +81,7 @@ impl App {
             session: None,
             log,
             remembered: Remembered::default(),
+            active: Vec::new(),
             profile: PackProfile::default(),
             series_detected: false,
             c_rate: 0.2,
@@ -151,7 +155,21 @@ impl App {
             *g = Some(session.tx.clone());
         }
         let _ = session.tx.send(Command::SetProfile(self.profile));
+        self.active = self.selected_specs();
         self.session = Some(session);
+    }
+
+    /// What the dropdowns currently say, which is not the same as what the
+    /// worker has open until Connect is pressed.
+    fn selected_specs(&self) -> Vec<String> {
+        [&self.pack_pick, &self.charger_pick, &self.load_pick]
+            .iter()
+            .map(|p| p.spec().unwrap_or_default())
+            .collect()
+    }
+
+    fn pending_connect(&self) -> bool {
+        !self.active.is_empty() && self.selected_specs() != self.active
     }
 
     fn config(&self) -> Config {
@@ -859,11 +877,30 @@ impl App {
                 // list happens to hold, or start a second scan to find a
                 // default target.
                 let busy = scanning_any;
+                let pending = self.pending_connect();
                 ui.add_enabled_ui(!busy, |ui| {
-                    if ui.button(theme::value("Connect")).clicked() {
+                    let text = if pending {
+                        RichText::new("Connect")
+                            .size(theme::VALUE_SIZE)
+                            .color(theme::READOUT)
+                            .strong()
+                    } else {
+                        theme::value("Connect")
+                    };
+                    if ui.button(text).clicked() {
                         reconnect = true;
                     }
                 });
+                if pending {
+                    // Changing a dropdown does nothing until the session is
+                    // reopened, and a stale session looks exactly like a
+                    // device that will not start.
+                    theme::note(
+                        ui,
+                        "Selection changed: press Connect to use it.",
+                        theme::READOUT,
+                    );
+                }
             },
         );
         if rescan || header_rescan {
@@ -1041,8 +1078,19 @@ impl App {
                     field(ui, "hold h", &mut self.hold_hours, 1.0..=72.0, 1.0, 0);
                 }
                 ui.add_space(6.0);
+                let pending = self.pending_connect();
+                if pending {
+                    theme::note(
+                        ui,
+                        "Devices changed: press Connect before starting.",
+                        theme::READOUT,
+                    );
+                }
                 ui.horizontal(|ui| {
-                    if ui.button(theme::value("Charge")).clicked() {
+                    if ui
+                        .add_enabled(!pending, egui::Button::new(theme::value("Charge")))
+                        .clicked()
+                    {
                         self.send(Command::Start(self.plan(false)));
                     }
                     if ui
@@ -1133,8 +1181,12 @@ impl App {
                     theme::LEGEND,
                 );
                 ui.add_space(4.0);
+                let pending = self.pending_connect();
                 ui.horizontal(|ui| {
-                    if ui.button(theme::value("Discharge")).clicked() {
+                    if ui
+                        .add_enabled(!pending, egui::Button::new(theme::value("Discharge")))
+                        .clicked()
+                    {
                         self.send(Command::Start(Plan::discharge(self.discharge_config())));
                     }
                     if ui

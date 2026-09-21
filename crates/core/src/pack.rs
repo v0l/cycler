@@ -153,6 +153,11 @@ pub trait Pack {
         let _ = profile;
     }
 
+    /// Nothing can see the battery any more: the supply is off and the load
+    /// is disconnected. Holding the last reading would show a charge that
+    /// stopped minutes ago as if it were still running.
+    fn lost(&mut self) {}
+
     /// What the charger or load is measuring at its terminals. A blind pack
     /// has no other source of truth, so the run loop hands it the instrument
     /// reading before each read.
@@ -224,6 +229,11 @@ impl Pack for BlindPack {
     fn observe(&mut self, volts: f64, amps: f64) {
         self.volts = volts;
         self.amps = amps;
+    }
+
+    fn lost(&mut self) {
+        self.volts = 0.0;
+        self.amps = 0.0;
     }
 
     fn read(&mut self) -> Result<Snapshot> {
@@ -449,6 +459,18 @@ mod tests {
         assert_eq!(s.spread_mv(), 69);
         assert_eq!(s.high_cell(), 1);
         assert_eq!(s.low_cell(), 0);
+    }
+
+    #[test]
+    fn a_blind_pack_forgets_a_reading_nothing_can_still_see() {
+        let mut p = BlindPack::open("");
+        p.observe(15.0, 2.0);
+        assert_eq!(p.read().unwrap().current_a, 2.0);
+        p.lost();
+        let s = p.read().unwrap();
+        assert_eq!(s.current_a, 0.0);
+        assert_eq!(s.pack_v, 0.0);
+        assert_eq!(s.state_label(), "idle");
     }
 
     #[test]

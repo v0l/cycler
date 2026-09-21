@@ -184,6 +184,12 @@ impl Controller {
             hi < c.cell_resume_mv
         };
 
+        // A blind pack with no reading at all: the supply is off and nothing
+        // else can see the battery, so there is no voltage to regulate to.
+        if blind && s.pack_v <= 0.5 && self.output_on {
+            self.note = "no voltage reading: is the battery connected?".into();
+        }
+
         // Watchdog: the output is on, so current should be flowing. Charging
         // a pack that is not taking anything means something is in the way.
         // The clock starts when the output is commanded on, not here, or the

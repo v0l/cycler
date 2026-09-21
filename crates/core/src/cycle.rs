@@ -328,8 +328,9 @@ pub fn run(
                 let on = c.output_on().ok().flatten().unwrap_or(false);
                 c.measure().ok().map(|s| (s.volts, s.amps, on))
             });
-            if let Some((v, a)) = crate::pack::blind_reading(from_charger, from_load) {
-                pack.observe(v, a);
+            match crate::pack::blind_reading(from_charger, from_load) {
+                Some((v, a)) => pack.observe(v, a),
+                None => pack.lost(),
             }
         }
         let snapshot = match pack.read() {
