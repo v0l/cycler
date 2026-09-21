@@ -147,9 +147,13 @@ pub struct Remembered {
     /// same kind of fact: a property of the rig, not of a run.
     #[serde(default)]
     pub profile: Option<cycler_core::chemistry::PackProfile>,
-    /// Test rate as a fraction of capacity.
+    /// Charge rate as a fraction of capacity.
     #[serde(default)]
     pub c_rate: Option<f64>,
+    /// Discharge rate, which is the one that decides what a measured
+    /// capacity means.
+    #[serde(default)]
+    pub discharge_c_rate: Option<f64>,
 }
 
 fn config_path() -> Option<PathBuf> {

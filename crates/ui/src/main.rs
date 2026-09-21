@@ -48,7 +48,8 @@ struct App {
     series_detected: bool,
     /// Test rate as a fraction of capacity: 0.2C fills or empties a pack in
     /// about five hours.
-    c_rate: f64,
+    charge_c: f64,
+    discharge_c: f64,
     pack_floor_v: f64,
     pack_pick: Choice,
     charger_pick: Choice,
@@ -64,7 +65,9 @@ struct App {
     ceiling_mv: u16,
     target_mv: u16,
     hold_hours: f64,
+    absorb_hours: f64,
     float_v: f64,
+    i_term: Option<f64>,
     charge_to_soc: bool,
     discharge_to_soc: bool,
     target_soc: f64,
@@ -84,7 +87,8 @@ impl App {
             active: Vec::new(),
             profile: PackProfile::default(),
             series_detected: false,
-            c_rate: 0.2,
+            charge_c: PackProfile::default().chemistry.default_charge_c(),
+            discharge_c: PackProfile::default().chemistry.default_discharge_c(),
             pack_floor_v: PackProfile::default().floor_v(),
             pack_pick: Choice::new("battery", PACK_BACKENDS),
             charger_pick: Choice::new("charger", CHARGER_BACKENDS),
@@ -94,13 +98,15 @@ impl App {
             started: Instant::now(),
             last: None,
             error: None,
-            mode: Mode::Auto,
+            mode: Mode::Standard,
             cv: 51.5,
             max_current: 3.0,
             ceiling_mv: 3500,
             target_mv: 3450,
             hold_hours: 48.0,
+            absorb_hours: 6.0,
             float_v: 51.0,
+            i_term: None,
             charge_to_soc: false,
             discharge_to_soc: false,
             target_soc: 50.0,
@@ -112,7 +118,10 @@ impl App {
         };
         app.remembered = Remembered::load();
         if let Some(r) = app.remembered.c_rate.filter(|r| *r > 0.0) {
-            app.c_rate = r;
+            app.charge_c = r;
+        }
+        if let Some(r) = app.remembered.discharge_c_rate.filter(|r| *r > 0.0) {
+            app.discharge_c = r;
         }
         if let Some(p) = app.remembered.profile {
             app.profile = p;
@@ -129,7 +138,8 @@ impl App {
 
     fn connect(&mut self) {
         self.remembered.profile = Some(self.profile);
-        self.remembered.c_rate = Some(self.c_rate);
+        self.remembered.c_rate = Some(self.charge_c);
+        self.remembered.discharge_c_rate = Some(self.discharge_c);
         self.remembered.remember([&self.pack_pick, &self.charger_pick, &self.load_pick]);
         // Wait for the old worker to release the ports before opening them
         // again, or the two sessions fight over the same serial device.
@@ -175,17 +185,96 @@ impl App {
     fn config(&self) -> Config {
         Config {
             mode: self.mode,
-            pack_cv: self.cv,
+            v_absorb: self.cv,
             cell_ceiling_mv: self.ceiling_mv,
             cell_hard_mv: self.ceiling_mv + 50,
-            cell_resume_mv: self.ceiling_mv.saturating_sub(40),
             cell_target_mv: self.target_mv,
-            float_v: self.float_v,
+            v_float: self.float_v,
+            v_recharge: self.float_v - 0.1 * self.profile.series.max(1) as f64,
+            i_term: self.stop_current(),
+            absorb_max: Duration::from_secs_f64(self.absorb_hours * 3600.0),
             stop_at_soc: self.charge_to_soc.then_some(self.target_soc as u8),
             i_max: self.max_current,
+            i_start: (self.max_current * 0.3).min(self.max_current),
             hold_max: Duration::from_secs_f64(self.hold_hours * 3600.0),
-            ..Default::default()
+            // Everything not on the card comes from what the pack is, not
+            // from a default built for a 15S lithium bench pack.
+            ..Config::for_profile(&self.profile)
         }
+    }
+
+    /// What the rig is doing, if anything: a plan owns the battery, the
+    /// supply and the load until it ends, so nothing else may start one.
+    fn busy(&self) -> Option<String> {
+        let u = self.last.as_ref()?;
+        if !u.running {
+            return None;
+        }
+        Some(if u.plan_steps > 1 {
+            format!("a cycle test is running ({})", u.step_label)
+        } else if u.step_label.starts_with("charge") {
+            "a charge is running".into()
+        } else {
+            "a discharge is running".into()
+        })
+    }
+
+    /// Whether a charge is running right now, which is when the settings
+    /// that define it stop being settings.
+    fn charging(&self) -> bool {
+        self.last
+            .as_ref()
+            .is_some_and(|u| u.running && u.step_label.starts_with("charge"))
+    }
+
+    /// The part of the charge config a running charge will still take.
+    fn tuning(&self) -> cycler_core::charge::Tuning {
+        cycler_core::charge::Tuning {
+            i_max: self.max_current,
+            i_term: self.stop_current(),
+            absorb_max: Duration::from_secs_f64(self.absorb_hours * 3600.0),
+            hold_max: Duration::from_secs_f64(self.hold_hours * 3600.0),
+            stop_at_soc: self.charge_to_soc.then_some(self.target_soc as u8),
+        }
+    }
+
+    /// Why a card has nothing to offer: not connected yet, or connected
+    /// without the device that card drives.
+    fn missing(&self, what: &str) -> String {
+        if self.last.is_none() {
+            "Not connected: pick the devices and press Connect.".into()
+        } else {
+            format!("No {what} is open. Pick one and press Connect.")
+        }
+    }
+
+    /// Whether a supply is open. Everything on the charge card depends on
+    /// it, and so does half of a cycle plan.
+    fn has_charger(&self) -> bool {
+        self.last.as_ref().is_some_and(|u| u.has_charger)
+    }
+
+    fn has_load(&self) -> bool {
+        self.last.as_ref().is_some_and(|u| u.has_load)
+    }
+
+    /// A load that cannot be switched or set from here: the run tells you
+    /// when to connect it and counts amp-hours from the pack instead.
+    fn load_manual(&self) -> bool {
+        self.last.as_ref().is_some_and(|u| u.load_manual)
+    }
+
+    /// Whether this pack goes on to a float after terminating. Lead-acid
+    /// does; a lithium pack is left alone.
+    fn floats(&self) -> bool {
+        self.mode == Mode::Standard && self.profile.chemistry == Chemistry::LeadAcid
+    }
+
+    /// Where absorption ends. C/20 unless it has been typed over.
+    fn stop_current(&self) -> f64 {
+        self.i_term.unwrap_or_else(|| {
+            (self.capacity_ah() * self.profile.chemistry.default_termination_c()).max(0.1)
+        })
     }
 
     /// The capacity to size test currents from: the BMS's rating when it has
@@ -242,10 +331,9 @@ impl App {
         self.target_mv = cell.balance_mv;
         self.floor_mv = cell.floor_mv;
         self.pack_floor_v = self.profile.floor_v();
-        // A gentle test: fill and empty at a fifth of capacity.
-        let rate = (self.capacity_ah() * self.c_rate).max(0.1);
-        self.max_current = rate;
-        self.discharge_a = rate;
+        let capacity = self.capacity_ah();
+        self.max_current = (capacity * self.charge_c).max(0.1);
+        self.discharge_a = (capacity * self.discharge_c).max(0.1);
     }
 
     fn drain(&mut self) {
@@ -572,9 +660,23 @@ impl App {
         let reported = last.as_ref().and_then(|u| u.charger_output);
         let on = reported.unwrap_or(wanted);
         let disagrees = reported.is_some_and(|r| r != wanted);
+        let pack_v = last
+            .as_ref()
+            .and_then(|u| u.snapshot.as_ref())
+            .map(|s| s.pack_v)
+            .unwrap_or(0.0);
+        let seen = last.as_ref().and_then(|u| u.charger).map(|(v, _)| v);
+        let mismatch = on && seen.is_some_and(|v| cycler_core::agree::disagrees(pack_v, v));
+        let unseen = on && pack_v > 0.5 && seen.is_some_and(|v| v <= 0.5);
         theme::card(
             ui,
-            Some(if on { theme::OK } else { theme::ETCH }),
+            Some(if mismatch || unseen {
+                theme::FAULT
+            } else if on {
+                theme::OK
+            } else {
+                theme::ETCH
+            }),
             |ui| {
                 ui.label(theme::legend("charger"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -583,11 +685,37 @@ impl App {
                     {
                         ui.label(theme::legend(r.label()));
                     }
-                    theme::lamp(ui, if on { "output on" } else { "output off" }, on, disagrees);
+                    if mismatch {
+                        theme::lamp(ui, "wrong battery?", true, true);
+                    } else if unseen {
+                        theme::lamp(ui, "no battery seen", true, true);
+                    }
+                    theme::lamp(
+                        ui,
+                        if on { "output on" } else { "output off" },
+                        on,
+                        disagrees || mismatch || unseen,
+                    );
                 });
             },
             |ui| {
                 let (v, a) = last.as_ref().and_then(|u| u.charger).unwrap_or((0.0, 0.0));
+                if mismatch {
+                    theme::note(
+                        ui,
+                        format!(
+                            "supply sees {v:.2} V, battery reads {pack_v:.2} V: \
+                             not the same pack"
+                        ),
+                        theme::FAULT,
+                    );
+                } else if unseen {
+                    theme::note(
+                        ui,
+                        "output on and no voltage at the terminals: check the leads and fuse.",
+                        theme::FAULT,
+                    );
+                }
                 if disagrees {
                     theme::note(
                         ui,
@@ -646,12 +774,9 @@ impl App {
             .map(|s| s.pack_v)
             .unwrap_or(0.0);
         let mismatch = load
-            .map(|l| {
-                l.volts > 0.5
-                    && pack_v_hdr > 0.5
-                    && (pack_v_hdr - l.volts).abs() > (pack_v_hdr * 0.1).max(2.0)
-            })
+            .map(|l| cycler_core::agree::disagrees(pack_v_hdr, l.volts))
             .unwrap_or(false);
+        let unseen = on && pack_v_hdr > 0.5 && load.map(|l| l.volts <= 0.5).unwrap_or(false);
         theme::card(
             ui,
             Some(if mismatch {
@@ -666,8 +791,15 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if mismatch {
                         theme::lamp(ui, "wrong battery?", true, true);
+                    } else if unseen {
+                        theme::lamp(ui, "no battery seen", true, true);
                     }
-                    theme::lamp(ui, if on { "load on" } else { "load off" }, on, mismatch);
+                    theme::lamp(
+                        ui,
+                        if on { "load on" } else { "load off" },
+                        on,
+                        mismatch || unseen,
+                    );
                 });
             },
             |ui| match load {
@@ -945,6 +1077,12 @@ impl App {
                             ui.selectable_value(&mut self.profile.chemistry, c, c.label());
                         }
                     });
+                // A rate typed for one chemistry means nothing for the next:
+                // C/5 is gentle on lithium and abuse on lead-acid.
+                if self.profile.chemistry != before.chemistry {
+                    self.charge_c = self.profile.chemistry.default_charge_c();
+                    self.discharge_c = self.profile.chemistry.default_discharge_c();
+                }
                 if from_bms {
                     ui.horizontal(|ui| {
                         ui.label(
@@ -976,16 +1114,25 @@ impl App {
                     self.profile.parallel = parallel as u16;
                     field(ui, "cell Ah", &mut self.profile.cell_ah, 0.5..=1000.0, 1.0, 1);
                 }
-                field(ui, "C rate", &mut self.c_rate, 0.01..=3.0, 0.05, 2);
+                field(ui, "charge C", &mut self.charge_c, 0.01..=3.0, 0.05, 2);
+                field(ui, "discharge C", &mut self.discharge_c, 0.01..=3.0, 0.05, 2);
+                if self.profile.chemistry == Chemistry::LeadAcid {
+                    theme::note(
+                        ui,
+                        "Lead-acid capacity is quoted at the 20 hour rate, so C/20 out is \
+                         what the rating on the label means. Above C/10 in it gasses.",
+                        theme::LEGEND,
+                    );
+                }
                 theme::note(
                     ui,
                     format!(
-                        "{:.2} V charge, {:.2} V float, {:.2} V floor, {:.2} A at {:.2}C",
+                        "{:.2} V charge, {:.2} V float, {:.2} V floor, {:.2} A in, {:.2} A out",
                         self.profile.charge_v(),
                         self.profile.float_v(),
                         self.profile.floor_v(),
-                        (capacity * self.c_rate).max(0.1),
-                        self.c_rate
+                        (capacity * self.charge_c).max(0.1),
+                        (capacity * self.discharge_c).max(0.1)
                     ),
                     theme::LEGEND,
                 );
@@ -1023,59 +1170,107 @@ impl App {
                 });
             },
             |ui| {
-                egui::ComboBox::from_id_salt("mode")
-                    .selected_text(match self.mode {
-                        Mode::Auto => "Auto (bulk then float)",
-                        Mode::Bulk => "Bulk",
-                        Mode::TopBalance => "Top balance",
-                        Mode::Unbalanced => "Unbalanced",
-                    })
-                    .width(ui.available_width().max(0.0))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.mode,
-                            Mode::Auto,
-                            "Auto (bulk then float)",
-                        );
-                        ui.selectable_value(&mut self.mode, Mode::Bulk, "Bulk");
-                        ui.selectable_value(&mut self.mode, Mode::TopBalance, "Top balance");
-                        ui.selectable_value(&mut self.mode, Mode::Unbalanced, "Unbalanced");
-                    });
+                if !self.has_charger() {
+                    theme::note(ui, self.missing("charger"), theme::FAULT);
+                    return;
+                }
+                // What the stages mean, and what the cells are held to, is
+                // settled when the run starts. Changing either half way up a
+                // charge changes what the machine already decided.
+                let locked = self.charging();
+                ui.add_enabled_ui(!locked, |ui| {
+                    egui::ComboBox::from_id_salt("mode")
+                        .selected_text(match self.mode {
+                            Mode::Standard => "Standard",
+                            Mode::TopBalance => "Top balance",
+                            Mode::BulkOnly => "Bulk only",
+                        })
+                        .width(ui.available_width().max(0.0))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.mode, Mode::Standard, "Standard");
+                            ui.selectable_value(&mut self.mode, Mode::TopBalance, "Top balance");
+                            ui.selectable_value(&mut self.mode, Mode::BulkOnly, "Bulk only");
+                        });
+                });
                 theme::note(
                     ui,
                     match self.mode {
-                        Mode::Auto => {
-                            "Bulk to the cell ceiling, then float until the BMS reads 100%."
+                        Mode::Standard => {
+                            "Pre-charge if flat, bulk, absorb, then stop (or float lead-acid)."
                         }
-                        Mode::Bulk => "Taper at the ceiling, stop at floor current.",
-                        Mode::TopBalance => "Bulk, then hold at floor current for the balancers.",
-                        Mode::Unbalanced => "Stop the instant any cell touches the ceiling.",
+                        Mode::TopBalance => "Absorb, then hold at the ceiling for the balancers.",
+                        Mode::BulkOnly => "Constant current only: stop at the ceiling, no absorb.",
                     },
                     theme::LEGEND,
                 );
                 ui.add_space(4.0);
+                let before = self.tuning();
                 field(ui, "max A", &mut self.max_current, 0.2..=10.0, 0.1, 2);
-                field(ui, "CV V", &mut self.cv, 1.0..=150.0, 0.1, 2);
-                if self.mode == Mode::Auto {
-                    field(ui, "float V", &mut self.float_v, 1.0..=150.0, 0.1, 2);
+                ui.add_enabled_ui(!locked, |ui| {
+                    field(ui, "CV V", &mut self.cv, 1.0..=150.0, 0.1, 2);
+                    if self.mode == Mode::Standard {
+                        field(ui, "float V", &mut self.float_v, 1.0..=150.0, 0.1, 2);
+                    }
+                });
+                let mut term = self.stop_current();
+                field(ui, "stop A", &mut term, 0.05..=20.0, 0.05, 2);
+                if (term - self.stop_current()).abs() > f64::EPSILON {
+                    self.i_term = Some(term);
                 }
+                theme::note(
+                    ui,
+                    "Absorption ends when the pack stops taking this much: C/20 by default.",
+                    theme::LEGEND,
+                );
                 if self.blind() {
                     theme::note(
                         ui,
-                        "No BMS: the CV setpoint is the ceiling and float is where it holds.",
+                        "No BMS: the CV setpoint is the ceiling, and the stop current ends it.",
                         theme::LEGEND,
                     );
                 } else {
-                    let mut ceiling = self.ceiling_mv as f64;
-                    field(ui, "ceiling mV", &mut ceiling, 2000.0..=4300.0, 5.0, 0);
-                    self.ceiling_mv = ceiling as u16;
+                    ui.add_enabled_ui(!locked, |ui| {
+                        let mut ceiling = self.ceiling_mv as f64;
+                        field(ui, "ceiling mV", &mut ceiling, 2000.0..=4300.0, 5.0, 0);
+                        self.ceiling_mv = ceiling as u16;
+                    });
                 }
                 soc_stop(ui, "stop at soc", &mut self.charge_to_soc, &mut self.target_soc);
+                if self.mode != Mode::BulkOnly {
+                    field(ui, "absorb h", &mut self.absorb_hours, 0.5..=24.0, 0.5, 1);
+                    theme::note(
+                        ui,
+                        "Longest absorption before it gives up waiting for the stop current.",
+                        theme::LEGEND,
+                    );
+                }
                 if self.mode == Mode::TopBalance {
-                    let mut target = self.target_mv as f64;
-                    field(ui, "target mV", &mut target, 2000.0..=4300.0, 5.0, 0);
-                    self.target_mv = target as u16;
+                    ui.add_enabled_ui(!locked, |ui| {
+                        let mut target = self.target_mv as f64;
+                        field(ui, "target mV", &mut target, 2000.0..=4300.0, 5.0, 0);
+                        self.target_mv = target as u16;
+                    });
                     field(ui, "hold h", &mut self.hold_hours, 1.0..=72.0, 1.0, 0);
+                } else if self.floats() {
+                    field(ui, "float h", &mut self.hold_hours, 1.0..=72.0, 1.0, 0);
+                    theme::note(
+                        ui,
+                        "Lead-acid: held at the float voltage this long after terminating.",
+                        theme::LEGEND,
+                    );
+                }
+                if locked {
+                    theme::note(
+                        ui,
+                        "Charging: currents and clocks are live, the voltages and the mode \
+                         are settled until it stops.",
+                        theme::LEGEND,
+                    );
+                }
+                // Everything above that a running charge will still obey.
+                let now = self.tuning();
+                if locked && now != before {
+                    self.send(Command::Tune(now));
                 }
                 ui.add_space(6.0);
                 let pending = self.pending_connect();
@@ -1086,9 +1281,16 @@ impl App {
                         theme::READOUT,
                     );
                 }
+                let busy = self.busy().filter(|_| !self.charging());
+                if let Some(what) = &busy {
+                    theme::note(ui, format!("{what}: stop it to charge."), theme::LEGEND);
+                }
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!pending, egui::Button::new(theme::value("Charge")))
+                        .add_enabled(
+                            !pending && busy.is_none(),
+                            egui::Button::new(theme::value("Charge")),
+                        )
                         .clicked()
                     {
                         self.send(Command::Start(self.plan(false)));
@@ -1126,6 +1328,25 @@ impl App {
                 });
             },
             |ui| {
+                if !self.has_load() {
+                    theme::note(ui, self.missing("load"), theme::FAULT);
+                    return;
+                }
+                // A resistor bank draws what it draws, cannot be switched
+                // from here, and stops when you disconnect it. There is
+                // nothing on this card it would obey.
+                if manual {
+                    theme::note(
+                        ui,
+                        format!(
+                            "{} cannot be driven from here: switch it by hand and watch \
+                             the battery card.",
+                            last.as_ref().map(|u| u.load_name.clone()).unwrap_or_default()
+                        ),
+                        theme::LEGEND,
+                    );
+                    return;
+                }
                 let modes: Vec<LoadMode> = last
                     .as_ref()
                     .map(|u| u.load_modes.clone())
@@ -1182,9 +1403,16 @@ impl App {
                 );
                 ui.add_space(4.0);
                 let pending = self.pending_connect();
+                let busy = self.busy().filter(|_| !wanted);
+                if let Some(what) = &busy {
+                    theme::note(ui, format!("{what}: stop it to discharge."), theme::LEGEND);
+                }
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!pending, egui::Button::new(theme::value("Discharge")))
+                        .add_enabled(
+                            !pending && busy.is_none(),
+                            egui::Button::new(theme::value("Discharge")),
+                        )
                         .clicked()
                     {
                         self.send(Command::Start(Plan::discharge(self.discharge_config())));
@@ -1236,6 +1464,27 @@ impl App {
                 });
             },
             |ui| {
+                // A capacity test needs both ends: something to fill the
+                // pack and something to empty it while counting.
+                // Both ends have to be drivable: a plan that cannot switch
+                // the load cannot time a discharge, and a plan that cannot
+                // switch the supply cannot charge between them.
+                let drivable_load = self.has_load() && !self.load_manual();
+                if !self.has_charger() || !drivable_load {
+                    let what = match (self.has_charger(), drivable_load) {
+                        (false, false) => "charger or load",
+                        (false, true) => "charger",
+                        _ => "load",
+                    };
+                    let why = if self.has_load() && self.load_manual() {
+                        "A cycle test has to switch the load itself. This one is manual."
+                            .to_string()
+                    } else {
+                        self.missing(what)
+                    };
+                    theme::note(ui, why, theme::FAULT);
+                    return;
+                }
                 field(ui, "rest min", &mut self.rest_min, 0.0..=600.0, 5.0, 0);
                 let mut repeat = self.repeat as f64;
                 field(ui, "cycles", &mut repeat, 1.0..=20.0, 1.0, 0);
@@ -1246,7 +1495,17 @@ impl App {
                     theme::LEGEND,
                 );
                 ui.add_space(4.0);
-                if ui.button(theme::value("Run capacity test")).clicked() {
+                let busy = self.busy().filter(|_| !running);
+                if let Some(what) = &busy {
+                    theme::note(ui, format!("{what}: stop it to run a test."), theme::LEGEND);
+                }
+                if ui
+                    .add_enabled(
+                        busy.is_none(),
+                        egui::Button::new(theme::value("Run capacity test")),
+                    )
+                    .clicked()
+                {
                     self.send(Command::Start(self.plan(true)));
                 }
                 if let Some(u) = last.as_ref()
@@ -1428,11 +1687,7 @@ fn elide(text: &str, max: usize) -> String {
 /// you ask for it.
 fn soc_stop(ui: &mut egui::Ui, label: &str, on: &mut bool, value: &mut f64) {
     ui.horizontal(|ui| {
-        let tint = if *on { theme::READOUT } else { theme::LEGEND };
-        if ui
-            .selectable_label(*on, RichText::new(label.to_uppercase()).size(10.5).color(tint))
-            .clicked()
-        {
+        if theme::toggle(ui, label, *on).clicked() {
             *on = !*on;
         }
         if *on {

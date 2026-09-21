@@ -189,6 +189,19 @@ impl Runner {
             .and_then(|r| r.amp_hours)
     }
 
+    /// Retune the running charge and every charge still to come, so a change
+    /// made during cycle two is still there in cycle three.
+    pub fn retune_charge(&mut self, t: &charge::Tuning) {
+        for step in self.plan.steps.iter_mut() {
+            if let Step::Charge(c) = step {
+                t.apply(c);
+            }
+        }
+        if let Some(Active::Charge(c)) = self.active.as_mut() {
+            c.retune(t);
+        }
+    }
+
     pub fn step_sample(
         &mut self,
         s: &Snapshot,
@@ -409,7 +422,7 @@ mod tests {
     fn plan() -> Plan {
         Plan::capacity(
             charge::Config {
-                mode: charge::Mode::Unbalanced,
+                mode: charge::Mode::BulkOnly,
                 cell_ceiling_mv: 3500,
                 ..Default::default()
             },

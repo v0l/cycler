@@ -15,6 +15,7 @@ struct Cli {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ChemArg {
     Lifepo4,
+    #[value(alias = "lipo")]
     LiIon,
     Lto,
     LeadAcid,
@@ -60,7 +61,7 @@ enum Cmd {
     },
     /// Charge the pack under cell-level control.
     Charge {
-        #[arg(long, value_enum, default_value_t = charge::Mode::Bulk)]
+        #[arg(long, value_enum, default_value_t = charge::Mode::Standard)]
         mode: charge::Mode,
         #[arg(long, default_value = "pylontech-console:")]
         pack: String,
@@ -74,8 +75,16 @@ enum Cmd {
         ceiling_mv: u16,
         #[arg(long, default_value_t = 3450)]
         target_mv: u16,
+        /// Termination current: absorption ends when the pack stops taking
+        /// this much. C/20 of the pack is the usual figure.
+        #[arg(long, default_value_t = 0.2)]
+        stop_current: f64,
         #[arg(long, default_value_t = 20)]
         interval: u64,
+        /// Longest absorption before it stops waiting for the stop current.
+        #[arg(long, default_value_t = 6.0)]
+        absorb_hours: f64,
+        /// Longest balance hold, and how long a float is maintained.
         #[arg(long, default_value_t = 48.0)]
         hold_hours: f64,
         /// Stop at this state of charge, e.g. 50 for storage.
@@ -126,7 +135,7 @@ enum Cmd {
         charger: String,
         #[arg(long, default_value = "dl24:")]
         load: String,
-        #[arg(long, value_enum, default_value_t = charge::Mode::Auto)]
+        #[arg(long, value_enum, default_value_t = charge::Mode::Standard)]
         charge_mode: charge::Mode,
         #[arg(long, default_value_t = 3.0)]
         max_current: f64,
@@ -138,6 +147,16 @@ enum Cmd {
         discharge_a: f64,
         #[arg(long, default_value_t = 3000)]
         floor_mv: u16,
+        /// Termination current: absorption ends when the pack stops taking
+        /// this much. C/20 of the pack is the usual figure.
+        #[arg(long, default_value_t = 0.2)]
+        stop_current: f64,
+        /// Chemistry of a pack with no BMS, for voltage-derived SOC.
+        #[arg(long, value_enum, default_value_t = ChemArg::Lifepo4)]
+        chemistry: ChemArg,
+        /// Cells in series, for a pack with no BMS.
+        #[arg(long, default_value_t = 15)]
+        series: u16,
         #[arg(long, default_value_t = 30.0)]
         rest_min: f64,
         #[arg(long, default_value_t = 1)]
@@ -193,9 +212,13 @@ enum Cmd {
         parallel: u16,
         #[arg(long, default_value_t = 50.0)]
         cell_ah: f64,
-        /// C-rate for the suggested currents.
-        #[arg(long, default_value_t = 0.2)]
-        c_rate: f64,
+        /// Charge rate, as a fraction of capacity. Defaults to the
+        /// chemistry's own figure.
+        #[arg(long)]
+        charge_c: Option<f64>,
+        /// Discharge rate, which decides what the measured capacity means.
+        #[arg(long)]
+        discharge_c: Option<f64>,
     },
     /// List the backends and what each could open on this host.
     Devices,
@@ -324,7 +347,9 @@ fn main() -> Result<()> {
             cv,
             ceiling_mv,
             target_mv,
+            stop_current,
             interval,
+            absorb_hours,
             hold_hours,
             stop_at_soc,
             chemistry,
@@ -332,26 +357,29 @@ fn main() -> Result<()> {
             log,
         } => {
             let mut pack = pack::open_pack(&pack_spec)?;
-            pack.set_profile(cycler_core::chemistry::PackProfile {
+            let profile = cycler_core::chemistry::PackProfile {
                 chemistry: chemistry.into(),
                 series,
                 ..Default::default()
-            });
+            };
+            pack.set_profile(profile);
             let mut charger = device::open_charger(&charger_spec)?;
             println!("{} <- {}", pack.name(), charger.name());
             let cfg = charge::Config {
                 mode,
-                pack_cv: cv,
+                v_absorb: cv,
                 cell_ceiling_mv: ceiling_mv,
                 cell_hard_mv: ceiling_mv + 50,
-                cell_resume_mv: ceiling_mv.saturating_sub(40),
                 cell_target_mv: target_mv,
-                float_v: cv - 0.5,
+                v_float: cv - 0.5,
+                v_recharge: cv - 2.0,
+                i_term: stop_current,
                 stop_at_soc,
                 i_max: max_current,
                 interval: Duration::from_secs(interval),
+                absorb_max: Duration::from_secs_f64(absorb_hours * 3600.0),
                 hold_max: Duration::from_secs_f64(hold_hours * 3600.0),
-                ..Default::default()
+                ..charge::Config::for_profile(&profile)
             };
             let mut csv = match log {
                 Some(p) => {
@@ -433,12 +461,21 @@ fn main() -> Result<()> {
             ceiling_mv,
             discharge_a,
             floor_mv,
+            stop_current,
+            chemistry,
+            series,
             rest_min,
             cycles,
             interval,
             log,
         } => {
             let mut pack = pack::open_pack(&pack_spec)?;
+            let profile = cycler_core::chemistry::PackProfile {
+                chemistry: chemistry.into(),
+                series,
+                ..Default::default()
+            };
+            pack.set_profile(profile);
             let mut charger = device::open_charger(&charger_spec)?;
             let mut load = cycler_core::open_discharger(&load_spec)?;
             println!(
@@ -450,13 +487,14 @@ fn main() -> Result<()> {
             let plan = cycler_core::cycle::Plan::capacity(
                 charge::Config {
                     mode: charge_mode,
-                    pack_cv: cv,
-                    float_v: cv - 0.5,
+                    v_absorb: cv,
+                    v_float: cv - 0.5,
+                    v_recharge: cv - 2.0,
                     cell_ceiling_mv: ceiling_mv,
                     cell_hard_mv: ceiling_mv + 50,
-                    cell_resume_mv: ceiling_mv.saturating_sub(40),
                     i_max: max_current,
-                    ..Default::default()
+                    i_term: stop_current,
+                    ..charge::Config::for_profile(&profile)
                 },
                 cycler_core::discharge::Config {
                     setpoint: discharge_a,
@@ -566,7 +604,8 @@ fn main() -> Result<()> {
             series,
             parallel,
             cell_ah,
-            c_rate,
+            charge_c,
+            discharge_c,
         } => {
             let p = cycler_core::chemistry::PackProfile {
                 chemistry: chemistry.into(),
@@ -593,14 +632,18 @@ fn main() -> Result<()> {
                 p.floor_v(),
                 p.storage_v()
             );
-            let i = p.current_at_c(c_rate);
-            println!("  current {i:.2} A at {c_rate}C");
+            let charge_c = charge_c.unwrap_or_else(|| p.chemistry.default_charge_c());
+            let discharge_c = discharge_c.unwrap_or_else(|| p.chemistry.default_discharge_c());
+            let charge_a = p.current_at_c(charge_c);
+            let discharge_a = p.current_at_c(discharge_c);
+            println!("  current {charge_a:.2} A in at {charge_c}C, {discharge_a:.2} A out at {discharge_c}C");
             println!();
             println!(
-                "cycler cycle --cv {:.2} --ceiling-mv {} --max-current {i:.2} \\\n  --discharge-a {i:.2} --floor-mv {}",
+                "cycler cycle --cv {:.2} --ceiling-mv {} --max-current {charge_a:.2} \\\n  --discharge-a {discharge_a:.2} --floor-mv {} --stop-current {:.2}",
                 p.charge_v(),
                 cell.ceiling_mv,
-                cell.floor_mv
+                cell.floor_mv,
+                p.current_at_c(p.chemistry.default_termination_c())
             );
         }
         Cmd::Devices => {

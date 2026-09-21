@@ -11,6 +11,8 @@ pub enum Command {
     /// What the battery is, for a pack that cannot say so itself.
     SetProfile(cycler_core::chemistry::PackProfile),
     Start(Plan),
+    /// Change the currents and clocks of a charge that is already running.
+    Tune(cycler_core::charge::Tuning),
     Stop,
     Quit,
 }
@@ -34,13 +36,21 @@ pub struct Update {
     pub error: Option<String>,
     pub pack_name: String,
     pub charger_name: String,
+    /// Whether a supply is actually open. Without one there is nothing to
+    /// charge with, and the controls that pretend otherwise are a lie.
+    pub has_charger: bool,
     pub charger: Option<(f64, f64)>,
     /// What the supply says it is doing, not what we asked it to do.
     pub charger_output: Option<bool>,
     pub charger_regulation: Option<cycler_core::device::Regulation>,
     pub load_name: String,
+    pub has_load: bool,
     pub load: Option<LoadState>,
+    /// A load that cannot be switched from here: a resistor bank, a bulb.
     pub load_manual: bool,
+    /// An instrument that does not agree with the battery, or sees no
+    /// battery at all while it is switched on.
+    pub mismatch: Option<cycler_core::agree::Mismatch>,
     pub load_modes: Vec<cycler_core::device::LoadMode>,
 }
 
@@ -146,7 +156,7 @@ fn open(pack_spec: &str, charger_spec: &str, load_spec: Option<&str>) -> Devices
 /// How far the load's own voltage reading may differ from the pack's before
 /// they are clearly not connected to the same battery.
 fn mismatched(pack_v: f64, load_v: f64) -> bool {
-    load_v > 0.5 && pack_v > 0.5 && (pack_v - load_v).abs() > (pack_v * 0.1).max(2.0)
+    cycler_core::agree::disagrees(pack_v, load_v)
 }
 
 fn apply(d: &mut Devices, want: Demand, have: Demand, pack_v: f64) -> Result<(), String> {
@@ -213,6 +223,11 @@ fn run(
     let mut runner: Option<Runner> = None;
     let mut demand = Demand::default();
     let mut fails = 0u32;
+    // A supply that has just been switched on, and a load that polls slowly,
+    // both read nothing for a moment. Three polls in a row is a fault; one
+    // is a device catching up.
+    let mut disagreeing = 0u32;
+    let mut refused: Option<String> = None;
     let mut log = log_path.and_then(|p| match CsvLog::create(&p) {
         Ok(l) => Some(l),
         Err(e) => {
@@ -238,6 +253,12 @@ fn run(
                 cmd_rx.recv_timeout(left)
             };
             match cmd {
+                // One run at a time. Two plans over one battery would fight
+                // over the same supply and load, and the second would inherit
+                // a rig the first left mid-stage.
+                Ok(Command::Start(_)) if runner.is_some() => {
+                    refused = Some("already running: stop it before starting another".into());
+                }
                 Ok(Command::Start(plan)) => {
                     stop_all(&mut dev);
                     demand = Demand::default();
@@ -250,6 +271,11 @@ fn run(
                 Ok(Command::SetProfile(p)) => {
                     if let Some(pack) = dev.pack.as_mut() {
                         pack.set_profile(p);
+                    }
+                }
+                Ok(Command::Tune(t)) => {
+                    if let Some(r) = runner.as_mut() {
+                        r.retune_charge(&t);
                     }
                 }
                 Ok(Command::Stop) => {
@@ -288,9 +314,12 @@ fn run(
             step_index: 0,
             results: Vec::new(),
             measured_ah: None,
-            error: (!dev.errors.is_empty()).then(|| dev.errors.join("; ")),
+            error: refused
+                .take()
+                .or_else(|| (!dev.errors.is_empty()).then(|| dev.errors.join("; "))),
             pack_name: dev.pack_name.clone(),
             charger_name: dev.charger_name.clone(),
+            has_charger: dev.charger.is_some(),
             charger: dev
                 .charger
                 .as_mut()
@@ -299,7 +328,9 @@ fn run(
             charger_output: dev.charger.as_mut().and_then(|c| c.output_on().ok().flatten()),
             charger_regulation: dev.charger.as_mut().and_then(|c| c.regulation().ok().flatten()),
             load_name: dev.load_name.clone(),
+            has_load: dev.load.is_some(),
             load: load_state,
+            mismatch: None,
             load_manual: dev.load.as_ref().map(|l| !l.controllable()).unwrap_or(false),
             load_modes: dev.load.as_ref().map(|l| l.modes().to_vec()).unwrap_or_default(),
         };
@@ -345,6 +376,50 @@ fn run(
         match dev.pack.as_mut().map(|p| p.read()) {
             Some(Ok(s)) => {
                 fails = 0;
+                // A blind pack is read through these same instruments, so it
+                // agrees with them by construction: nothing to cross-check.
+                if !dev.pack.as_ref().map(|p| p.blind()).unwrap_or(false) {
+                    update.mismatch = cycler_core::agree::check(
+                        s.pack_v,
+                        &[
+                            cycler_core::agree::Instrument {
+                                who: "the charger",
+                                volts: update.charger.map(|(v, _)| v),
+                                live: update.charger_output.unwrap_or(false)
+                                    || demand.charger_on,
+                            },
+                            cycler_core::agree::Instrument {
+                                who: "the load",
+                                volts: load_state.map(|l| l.volts),
+                                live: load_state.map(|l| l.on).unwrap_or(false)
+                                    || demand.load_on,
+                            },
+                        ],
+                    );
+                }
+                disagreeing = if update.mismatch.is_some() {
+                    disagreeing + 1
+                } else {
+                    0
+                };
+                if disagreeing < 3 {
+                    update.mismatch = None;
+                }
+                if let Some(m) = update.mismatch.clone() {
+                    let message = m.message();
+                    if runner.is_some() {
+                        stop_all(&mut dev);
+                        demand = Demand::default();
+                        runner = None;
+                        update.running = false;
+                        update.note = format!("stopped: {message}");
+                        disagreeing = 0;
+                    }
+                    update.error = Some(message);
+                    update.snapshot = Some(s);
+                    let _ = up_tx.send(update);
+                    continue;
+                }
                 if let Some(r) = runner.as_mut() {
                     let want = r.step_sample(&s, load_state, Instant::now());
                     if let Err(e) = apply(&mut dev, want, demand, s.pack_v) {

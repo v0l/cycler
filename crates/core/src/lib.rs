@@ -1,3 +1,4 @@
+pub mod agree;
 pub mod charge;
 pub mod chemistry;
 pub mod cycle;
@@ -8,6 +9,7 @@ pub mod device;
 pub mod log;
 pub mod pack;
 
+pub use agree::{Instrument, Mismatch};
 pub use charge::{Config as ChargeConfig, Controller, Mode, Phase, Reason};
 pub use chemistry::{CellLimits, Chemistry, PackProfile};
 pub use cycle::{Demand, Plan, Runner, Step, StepResult};

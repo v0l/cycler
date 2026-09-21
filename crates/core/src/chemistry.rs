@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 pub enum Chemistry {
     /// Lithium iron phosphate. Flat curve, low ceiling, the usual storage pack.
     LiFePo4,
-    /// Lithium NMC/LCO, the 3.7 V nominal laptop and EV chemistry.
+    /// Lithium NMC/LCO, the 3.7 V nominal laptop and EV chemistry. A LiPo
+    /// is the same cell in a pouch, so it belongs here too.
     LiIon,
     /// Lithium titanate. Low voltage, very tolerant.
     Lto,
@@ -48,7 +49,7 @@ impl Chemistry {
     pub fn label(self) -> &'static str {
         match self {
             Chemistry::LiFePo4 => "LiFePO4",
-            Chemistry::LiIon => "Li-ion (NMC)",
+            Chemistry::LiIon => "Li-ion / LiPo",
             Chemistry::Lto => "LTO",
             Chemistry::LeadAcid => "Lead-acid",
         }
@@ -92,6 +93,42 @@ impl Chemistry {
                 storage_mv: 2133,
                 balance_mv: 2400,
             },
+        }
+    }
+
+    /// The rate to charge at, as a fraction of capacity. Filling a pack is
+    /// the half that ages it, so these sit well under what the cells allow.
+    pub fn default_charge_c(self) -> f64 {
+        match self {
+            Chemistry::LiFePo4 => 0.2,
+            Chemistry::LiIon => 0.2,
+            // Built for it: an LTO cell takes several C without complaint.
+            Chemistry::Lto => 0.5,
+            // Above C/10 a lead-acid battery gasses and heats rather than
+            // charging, and the absorption stage gets longer, not shorter.
+            Chemistry::LeadAcid => 0.1,
+        }
+    }
+
+    /// The rate to discharge at. This one sets what the capacity number
+    /// means: a pack measured fast reads low, and lead-acid dramatically so,
+    /// which is why its rating is quoted at the twenty hour rate.
+    pub fn default_discharge_c(self) -> f64 {
+        match self {
+            Chemistry::LiFePo4 => 0.5,
+            Chemistry::LiIon => 0.5,
+            Chemistry::Lto => 1.0,
+            Chemistry::LeadAcid => 0.05,
+        }
+    }
+
+    /// Where absorption ends, as a fraction of capacity. Lithium is done at
+    /// C/20; a lead-acid battery keeps taking a small current long after it
+    /// is full, so its tail is quoted nearer 2% of capacity.
+    pub fn default_termination_c(self) -> f64 {
+        match self {
+            Chemistry::LeadAcid => 0.02,
+            _ => 0.05,
         }
     }
 
@@ -259,6 +296,26 @@ mod tests {
         assert!((p.charge_v() - 14.4).abs() < 1e-9);
         assert!((p.float_v() - 13.602).abs() < 1e-3);
         assert!((p.floor_v() - 10.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_test_rates_follow_the_chemistry() {
+        // C/10 in and C/20 out on lead-acid, because that is the rate its
+        // capacity is quoted at.
+        assert!((Chemistry::LeadAcid.default_charge_c() - 0.1).abs() < 1e-9);
+        assert!((Chemistry::LeadAcid.default_discharge_c() - 0.05).abs() < 1e-9);
+        // Lithium is the other way round: it charges gently and discharges
+        // at whatever the test wants.
+        for c in [Chemistry::LiFePo4, Chemistry::LiIon, Chemistry::Lto] {
+            assert!(c.default_discharge_c() > c.default_charge_c(), "{c:?}");
+        }
+        for c in Chemistry::ALL {
+            assert!(c.default_charge_c() > 0.0 && c.default_charge_c() <= 1.0);
+            assert!(c.default_discharge_c() > 0.0 && c.default_discharge_c() <= 2.0);
+            // Terminating has to be a small fraction of charging, or the
+            // charge ends before the pack is full.
+            assert!(c.default_termination_c() < c.default_charge_c() / 2.0, "{c:?}");
+        }
     }
 
     #[test]

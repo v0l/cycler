@@ -15,10 +15,17 @@ hand. A battery with no BMS at all works too, on voltage limits alone.
 
 ## What it does
 
-- **Charge** in four modes: `auto` (bulk, then float until the pack reads
-  full), `bulk` (taper at the ceiling, stop at floor current), `top-balance`
-  (hold at the top for hours so passive balancers can work), and `unbalanced`
-  (stop the instant any cell touches the ceiling).
+- **Charge** through the standard stages: pre-charge a flat pack, bulk at
+  constant current, absorb at constant voltage, then terminate when the
+  current falls to C/20 and stays there. Lead-acid goes on to a float and
+  recharges when it sags; lithium stops, because sitting at a float voltage
+  only ages it. Three modes: `standard` (the full sequence), `top-balance`
+  (hold at the top for hours afterwards so passive balancers can work), and
+  `bulk-only` (constant current, stop at the ceiling, no absorption).
+- **Terminate on current, not on a gauge.** A pack with no BMS has no state of
+  charge to read, and plenty of BMSs never report 100%. The tail current at
+  the absorb voltage is what says full, and it is only believed while the
+  supply is actually holding that voltage.
 - **Discharge** in CC, CV, CR or CP, stopping on the first cell to reach its
   floor rather than waiting for the BMS to trip.
 - **Stop at a state of charge** in either direction, for putting a pack into
@@ -77,11 +84,12 @@ cycler discharge --setpoint 3 --floor-mv 3000
 cycler discharge --mode cp --setpoint 150
 
 # Storage: charge to 50% and stop, or run a full pack down to 50%
-cycler charge --mode bulk --stop-at-soc 50
+cycler charge --mode standard --stop-at-soc 50
 cycler discharge --setpoint 3 --stop-at-soc 50
 
-# Lead-acid, no BMS: absorb at 14.4 V, float at 13.6, stop when it stops taking
-cycler charge --pack none: --mode auto --cv 14.4 --max-current 10
+# Lead-acid, no BMS: absorb at 14.4 V, float at 13.6, terminate under 2 A
+cycler charge --pack none: --chemistry lead-acid --series 6 --cv 14.4 \
+  --max-current 10 --stop-current 2
 
 # Capacity test: charge, rest, discharge counting Ah, rest. Twice.
 cycler cycle --cycles 2 --max-current 3 --discharge-a 3 --log test.csv
@@ -131,7 +139,19 @@ is not a substitute for being in the room.
 - Cell ceiling, cell floor, pack temperature and a hard limit above the ceiling
   all stop the output. With no BMS, the same limits are applied to pack
   voltage, so set them for your chemistry: the defaults are 15S lithium.
+- A cell over the ceiling pulls the whole charge setpoint down by its
+  overshoot rather than stopping, which is how a pack stays inside a cell
+  limit without ending the charge. A cell over the *hard* limit cuts the
+  output, and a pack that does that repeatedly ends the run.
+- Absorption has a clock as well as a current: a pack that never terminates
+  stops on `absorb_max` rather than charging all night.
 - Two consecutive failed BMS reads stop the output: no telemetry, no charging.
+- The BMS, the supply and the load all measure the same terminals, so they are
+  cross-checked every poll. An instrument that is switched on and sees no
+  voltage is disconnected; one that reads a tenth away from the battery (or
+  two volts, whichever is larger) is on a different battery. Three polls in a
+  row of either stops the run, because every limit after that is being applied
+  to the wrong pack. Cable drop at a few amps sits inside the tolerance.
 - If the output is on and the pack still reports no current after 90 seconds,
   the run stops. A tripped breaker, a BMS refusing charge, a load over its
   voltage rating and a lead in the wrong place all look the same from here,

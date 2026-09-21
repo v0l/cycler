@@ -205,6 +205,60 @@ pub fn lamp(ui: &mut Ui, text: &str, on: bool, fault: bool) {
     );
 }
 
+/// A lamp you can press: the same key shape, so a setting that is on or off
+/// reads as a switch rather than as a caption.
+pub fn toggle(ui: &mut Ui, text: &str, on: bool) -> egui::Response {
+    let font = egui::FontId::proportional(LEGEND_SIZE);
+    let tint = if on { READOUT } else { LEGEND };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_uppercase(), font, tint);
+    let size = galley.size() + egui::vec2(26.0, 7.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let lit = on || response.hovered();
+    let p = ui.painter();
+    p.rect_filled(
+        rect,
+        2.0,
+        if on {
+            tint.gamma_multiply(0.18)
+        } else if response.hovered() {
+            ETCH.gamma_multiply(0.6)
+        } else {
+            WELL
+        },
+    );
+    p.rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0, if lit { tint } else { ETCH }),
+        egui::StrokeKind::Inside,
+    );
+    let box_side = 8.0;
+    let tick = Rect::from_center_size(
+        Pos2::new(rect.left() + 11.0, rect.center().y),
+        egui::vec2(box_side, box_side),
+    );
+    p.rect_stroke(
+        tick,
+        1.0,
+        Stroke::new(1.0, if lit { tint } else { LEGEND }),
+        egui::StrokeKind::Inside,
+    );
+    if on {
+        p.rect_filled(tick.shrink(2.0), 0.0, tint);
+    }
+    p.galley(
+        Pos2::new(tick.right() + 6.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        tint,
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
 /// A wrapped caption, for the sentences in the side panel that are prose
 /// rather than readings.
 pub fn note(ui: &mut Ui, text: impl Into<String>, color: Color32) {
