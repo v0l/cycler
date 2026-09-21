@@ -3,13 +3,13 @@ mod devices;
 mod theme;
 mod worker;
 
-use cycler_core::charge::{Config, Mode};
+use cycler_core::charge::{Config, Mode, Phase};
 use cycler_core::cycle::Plan;
 use cycler_core::chemistry::{Chemistry, PackProfile};
-use cycler_core::device::LoadMode;
+use cycler_core::device::{LoadMode, Regulation};
 use cycler_core::discharge;
 use cycler_core::device::{CHARGER_BACKENDS, LOAD_BACKENDS};
-use cycler_core::pack::{PACK_BACKENDS, Snapshot};
+use cycler_core::pack::PACK_BACKENDS;
 use devices::{Choice, Remembered};
 use egui::{Color32, RichText};
 use std::collections::VecDeque;
@@ -18,8 +18,10 @@ use std::time::{Duration, Instant};
 use worker::{Command, Session, Update};
 
 const HISTORY: usize = 7200;
-/// The chart is a strip under the cards, not the centre of the screen.
-const CHART_H: f32 = 264.0;
+/// Shortest strip worth drawing a trace in.
+const CHART_MIN_H: f32 = 150.0;
+/// Shortest comb worth drawing cells in.
+const COMB_MIN_H: f32 = 132.0;
 
 struct Sample {
     minutes: f64,
@@ -81,6 +83,14 @@ struct App {
     floor_mv: u16,
     rest_min: f64,
     repeat: usize,
+    /// Cell levels as drawn, easing towards the last reading, so a comb of
+    /// fifteen bars settles instead of jumping every poll.
+    shown_mv: Vec<f32>,
+    shown_at: Instant,
+    /// The rail as it stood on the last live update, and the rail as it was
+    /// left when the run ended.
+    running_stage: Option<StageView>,
+    ended: Option<StageView>,
 }
 
 impl App {
@@ -122,6 +132,10 @@ impl App {
             floor_mv: 3000,
             rest_min: 30.0,
             repeat: 1,
+            shown_mv: Vec::new(),
+            shown_at: Instant::now(),
+            running_stage: None,
+            ended: None,
         };
         app.remembered = Remembered::load();
         if let Some(r) = app.remembered.c_rate.filter(|r| *r > 0.0) {
@@ -246,6 +260,16 @@ impl App {
     }
 
     /// The part of the charge config a running charge will still take.
+    fn discharging(&self) -> bool {
+        self.last
+            .as_ref()
+            .is_some_and(|u| u.running && u.step_label.starts_with("discharge"))
+    }
+
+    fn load_tuning(&self) -> discharge::Tuning {
+        discharge::Tuning::of(&self.discharge_config())
+    }
+
     fn tuning(&self) -> cycler_core::charge::Tuning {
         cycler_core::charge::Tuning {
             i_max: self.max_current,
@@ -268,6 +292,16 @@ impl App {
 
     /// Whether a supply is open. Everything on the charge card depends on
     /// it, and so does half of a cycle plan.
+    /// Whether anything is reporting cells. Without them there is no comb to
+    /// draw and no per-cell trace to plot, and an empty well for each is a
+    /// worse answer than not showing them.
+    fn has_cells(&self) -> bool {
+        self.last
+            .as_ref()
+            .and_then(|u| u.snapshot.as_ref())
+            .is_some_and(|s| s.has_cells())
+    }
+
     fn has_charger(&self) -> bool {
         self.last.as_ref().is_some_and(|u| u.has_charger)
     }
@@ -320,7 +354,14 @@ impl App {
             mode: self.discharge_mode,
             setpoint: self.discharge_a,
             stop_at_soc: self.discharge_to_soc.then_some(self.target_soc as u8),
-            pack_floor_v: self.pack_floor_v,
+            // The load's own cutoff is programmed from this, so on a pack
+            // that reports cells it has to be the cell floor across the
+            // string rather than a limit left over from the profile.
+            pack_floor_v: if self.blind() {
+                self.pack_floor_v
+            } else {
+                self.floor_mv as f64 * self.profile.series.max(1) as f64 / 1000.0
+            },
             cell_floor_mv: self.floor_mv,
             stop_on_alarm: self.stop_on_alarm,
             alarms_ignored: self.alarms_ignored(),
@@ -347,6 +388,7 @@ impl App {
     fn apply_profile(&mut self) {
         let cell = self.profile.cell();
         self.cv = self.profile.charge_v();
+        self.profile.set_charge_v(self.cv);
         self.float_v = self.profile.float_v();
         self.ceiling_mv = cell.ceiling_mv;
         self.target_mv = cell.balance_mv;
@@ -389,8 +431,28 @@ impl App {
                     self.series_detected = true;
                 }
             }
+            // A run that has ended still has something to say, and the
+            // controller stops reporting the moment it lets go. Latch the
+            // last live rail and light its final segment, so a charge that
+            // finished while you were away still shows what ended it.
+            if u.running {
+                self.ended = None;
+            } else if self.ended.is_none()
+                && let Some(mut v) = self.running_stage.take()
+            {
+                v.plan_at = (!v.plan.is_empty()).then_some(v.plan.len() - 1);
+                v.at = (!v.stages.is_empty()).then_some(v.stages.len() - 1);
+                if !u.note.is_empty() {
+                    v.exit = u.note.clone();
+                }
+                v.done = true;
+                self.ended = Some(v);
+            }
             self.error = u.error.clone();
             self.last = Some(u);
+            if self.last.as_ref().is_some_and(|u| u.running) {
+                self.running_stage = Some(self.stage_view());
+            }
         }
     }
 
@@ -449,19 +511,38 @@ impl eframe::App for App {
             .show_inside(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new("cycler")
-                            .size(15.0)
-                            .strong()
+                        RichText::new("CYCLER")
+                            .font(theme::legend_font(15.0))
+                            .extra_letter_spacing(3.0)
                             .color(theme::VALUE),
                     );
                     if let Some(p) = &self.log {
                         ui.label(theme::legend(format!("logging {}", p.display())));
                     }
-                    if let Some(e) = &self.error {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(e) = &self.error {
                             ui.label(RichText::new(e).size(11.5).color(theme::FAULT));
-                        });
-                    }
+                        } else if let Some(s) =
+                            self.last.as_ref().and_then(|u| u.snapshot.as_ref())
+                            && s.has_cells()
+                        {
+                            let (lo, hi) = (s.low_mv(), s.high_mv());
+                            let tint = if hi >= self.ceiling_mv {
+                                theme::FAULT
+                            } else {
+                                theme::TRACE
+                            };
+                            ui.label(RichText::new(format!("{hi} mV")).font(theme::figure(13.0)).color(tint));
+                            ui.label(theme::legend("highest cell"));
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new(format!("{lo} mV"))
+                                    .font(theme::figure(13.0))
+                                    .color(theme::TRACE),
+                            );
+                            ui.label(theme::legend("lowest cell"));
+                        }
+                    });
                 });
             });
 
@@ -482,38 +563,52 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE.fill(theme::CHASSIS).inner_margin(8))
             .show_inside(root, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-                let height = ui.available_height();
+                self.stage_card(ui);
+                self.battery_card(ui);
                 ui.horizontal_top(|ui| {
-                    let left = 372.0_f32.min(ui.available_width() * 0.42).max(0.0);
+                    let w = ((ui.available_width() - 8.0) / 2.0).max(0.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(left, height.max(0.0)),
+                        egui::vec2(w, 0.0),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.battery_card(ui),
+                        |ui| self.charger_card(ui),
                     );
                     ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width().max(0.0), height.max(0.0)),
+                        egui::vec2(ui.available_width().max(0.0), 0.0),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.spacing_mut().item_spacing.y = 8.0;
-                            ui.horizontal_top(|ui| {
-                                let w = ((ui.available_width() - 8.0) / 2.0).max(0.0);
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(w, 0.0),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| self.charger_card(ui),
-                                );
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(ui.available_width().max(0.0), 0.0),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| self.load_card(ui),
-                                );
-                            });
-                            self.history_card(ui);
-                        },
+                        |ui| self.load_card(ui),
                     );
                 });
+                // Whatever is left over is split between the two views that
+                // reward the space: the comb of cells now, and the traces
+                // that got them there.
+                if self.has_cells() {
+                    let spare = (ui.available_height() - 8.0).max(0.0);
+                    let comb_h = (spare * 0.44 - CARD_CHROME).clamp(COMB_MIN_H, 300.0);
+                    self.cells_card(ui, comb_h);
+                }
+                let chart_h = (ui.available_height() - CARD_CHROME).max(CHART_MIN_H);
+                self.history_card(ui, chart_h);
             });
     }
+}
+
+/// Height a card spends on its own header, rules and margins, so a card told
+/// to fill the panel can work out what is left for its contents.
+const CARD_CHROME: f32 = 46.0;
+
+/// What the rails are showing: the plan's steps, and the stages of whichever
+/// step is running when that step has any of its own.
+#[derive(Default, Clone)]
+struct StageView {
+    plan: Vec<String>,
+    plan_at: Option<usize>,
+    stages: Vec<String>,
+    at: Option<usize>,
+    exit: String,
+    faulted: bool,
+    /// The run is over. The rail stays up, with its last segment lit, until
+    /// the next one starts.
+    done: bool,
 }
 
 impl App {
@@ -548,7 +643,6 @@ impl App {
             _ => "instrument",
         };
         let chem = self.profile.chemistry.label();
-        let ceiling = self.ceiling_mv;
         let measured = self
             .last
             .as_ref()
@@ -575,10 +669,12 @@ impl App {
                 Some(s) if !s.has_cells() => {
                     // Nothing here comes from the battery: it is whatever the
                     // charger or load can see at the terminals.
+                    ui.horizontal(|ui| {
+                        theme::hero(ui, "pack", &format!("{:.3}", s.pack_v), "V", theme::TRACE);
+                    });
                     theme::readouts(
                         ui,
                         &[
-                            ("pack", format!("{:.3} V", s.pack_v), theme::TRACE),
                             ("current", format!("{:+.3} A", s.current_a), theme::TRACE),
                             (
                                 "power",
@@ -600,10 +696,12 @@ impl App {
                     );
                 }
                 Some(s) => {
+                    ui.horizontal(|ui| {
+                        theme::hero(ui, "pack", &format!("{:.3}", s.pack_v), "V", theme::TRACE);
+                    });
                     theme::readouts(
                         ui,
                         &[
-                            ("pack", format!("{:.3} V", s.pack_v), theme::TRACE),
                             ("current", format!("{:+.3} A", s.current_a), theme::TRACE),
                             (
                                 "power",
@@ -673,15 +771,6 @@ impl App {
                             );
                         }
                     }
-                    ui.add_space(2.0);
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(theme::legend("cells"));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(theme::legend(format!("spread {} mV", s.spread_mv())));
-                        });
-                    });
-                    egui::ScrollArea::vertical().show(ui, |ui| cells_table(ui, s, ceiling));
                 }
                 None => {
                     ui.label(theme::legend("waiting for the first cell read"));
@@ -769,14 +858,31 @@ impl App {
                         ("out", format!("{v:.3} V"), theme::TRACE),
                         ("current", format!("{a:.3} A"), theme::TRACE),
                         ("power", format!("{:.2} W", v * a), theme::TRACE),
-                        (
-                            "set",
-                            format!(
-                                "{:.3} A",
-                                last.as_ref().map(|u| u.demand.charger_a).unwrap_or(0.0)
-                            ),
-                            theme::READOUT,
-                        ),
+                    ],
+                );
+                // Which setpoint is doing the work depends on the mode. In CC
+                // the current is the target and the voltage is the ceiling it
+                // is heading for; in CV that swaps, and calling the current a
+                // setpoint reads as a fault when the pack takes half of it.
+                let set_v = last.as_ref().map(|u| u.demand.charger_v).unwrap_or(0.0);
+                let set_a = last.as_ref().map(|u| u.demand.charger_a).unwrap_or(0.0);
+                let holding_v = last
+                    .as_ref()
+                    .and_then(|u| u.charger_regulation)
+                    .map(|r| r == Regulation::Cv)
+                    .unwrap_or(false);
+                let (v_label, a_label) = if !on {
+                    ("set V", "set A")
+                } else if holding_v {
+                    ("holding", "limit")
+                } else {
+                    ("ceiling", "holding")
+                };
+                theme::readouts(
+                    ui,
+                    &[
+                        (v_label, format!("{set_v:.2} V"), theme::READOUT),
+                        (a_label, format!("{set_a:.3} A"), theme::READOUT),
                     ],
                 );
                 ui.label(
@@ -883,6 +989,13 @@ impl App {
                     let wrong_battery = l.volts > 0.5
                         && pack_v > 0.5
                         && (pack_v - l.volts).abs() > (pack_v * 0.1).max(2.0);
+                    let demand = last.as_ref().map(|u| u.demand);
+                    let mode = demand.map(|d| d.load_mode).unwrap_or(LoadMode::Cc);
+                    let ohms = if l.amps.abs() > 0.001 {
+                        format!("{:.2} R", l.volts / l.amps)
+                    } else {
+                        "open".into()
+                    };
                     theme::readouts(
                         ui,
                         &[
@@ -893,12 +1006,55 @@ impl App {
                             ),
                             ("draw", format!("{:.3} A", l.amps), theme::TRACE),
                             ("power", format!("{:.2} W", l.watts), theme::TRACE),
+                            ("resistance", ohms, theme::TRACE),
                             ("drawn", format!("{:.4} Ah", l.amp_hours), theme::READOUT),
                             ("energy", format!("{:.2} Wh", l.watt_hours), theme::VALUE),
                             ("temp", format!("{:.0} C", l.temp_c), theme::VALUE),
                             ("run", format!("{:.0} min", l.runtime_s / 60.0), theme::VALUE),
                         ],
                     );
+                    // What the load was told, beside what it says it is
+                    // holding. A value sent in the wrong mode is accepted and
+                    // ignored, and this is the only place that shows it.
+                    if let Some(d) = demand.filter(|d| d.load_on) {
+                        let held = format!("{:.3} {}", l.setpoint, mode.unit());
+                        let disagrees =
+                            (l.setpoint - d.load_value).abs() > (d.load_value * 0.02).max(0.01);
+                        theme::readouts(
+                            ui,
+                            &[
+                                ("mode", mode.label().to_string(), theme::READOUT),
+                                (
+                                    "set",
+                                    format!("{:.3} {}", d.load_value, mode.unit()),
+                                    theme::READOUT,
+                                ),
+                                (
+                                    "cutoff",
+                                    format!("{:.2} V", d.load_cutoff_v),
+                                    theme::READOUT,
+                                ),
+                                (
+                                    "holding",
+                                    held,
+                                    if disagrees { theme::FAULT } else { theme::TRACE },
+                                ),
+                            ],
+                        );
+                        if disagrees {
+                            theme::note(
+                                ui,
+                                format!(
+                                    "Load says it is holding {:.3} {}, not the {:.3} it was \
+                                     told. The value went in while it was in another mode.",
+                                    l.setpoint,
+                                    mode.unit(),
+                                    d.load_value
+                                ),
+                                theme::FAULT,
+                            );
+                        }
+                    }
                     if wrong_battery {
                         theme::note(
                             ui,
@@ -923,7 +1079,11 @@ impl App {
         );
     }
 
-    fn history_card(&mut self, ui: &mut egui::Ui) {
+    fn history_card(&mut self, ui: &mut egui::Ui, height: f32) {
+        let cells = self.has_cells();
+        if !cells {
+            self.trace = Trace::Pack;
+        }
         let mut trace = self.trace;
         theme::card(
             ui,
@@ -931,16 +1091,260 @@ impl App {
             |ui| {
                 ui.label(theme::legend("history"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.selectable_value(&mut trace, Trace::Cells, theme::legend("cells"));
+                    if cells {
+                        ui.selectable_value(&mut trace, Trace::Cells, theme::legend("cells"));
+                    }
                     ui.selectable_value(&mut trace, Trace::Pack, theme::legend("pack"));
                 });
             },
             |ui| match self.trace {
-                Trace::Pack => self.pack_plot(ui),
-                Trace::Cells => self.cell_plot(ui),
+                Trace::Pack => self.pack_plot(ui, height),
+                Trace::Cells => self.cell_plot(ui, (height - 16.0).max(CHART_MIN_H)),
             },
         );
         self.trace = trace;
+    }
+
+    /// The stage rail. A charge is a sequence, so it is drawn as one, with
+    /// the thing that ends the running stage spelled out under it rather than
+    /// left for you to remember.
+    fn stage_card(&mut self, ui: &mut egui::Ui) {
+        let v = self.stage_view();
+        let live = v.plan_at.is_some() || v.at.is_some();
+        let tint = if v.faulted {
+            theme::FAULT
+        } else if v.done {
+            theme::OK
+        } else {
+            theme::READOUT
+        };
+        let cycles = self
+            .last
+            .as_ref()
+            .filter(|u| u.running && u.plan_repeat > 1)
+            .map(|u| format!("cycle {} of {}", u.cycle + 1, u.plan_repeat));
+        theme::card(
+            ui,
+            live.then_some(tint),
+            |ui| {
+                ui.label(theme::legend(match (live, v.done) {
+                    (_, true) => "last run",
+                    (true, _) => "running",
+                    _ => "idle",
+                }));
+                if let Some(c) = &cycles {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(theme::legend(c));
+                    });
+                }
+            },
+            |ui| {
+                // A cycle test is a sequence of steps, and a charge inside it
+                // is a sequence of its own. Two rails, the plan over the
+                // stage, so neither has to stand for the other.
+                if v.plan.len() > 1 {
+                    let names: Vec<&str> = v.plan.iter().map(|s| s.as_str()).collect();
+                    theme::stage_rail(ui, &names, v.plan_at, tint, 26.0, !v.stages.is_empty());
+                }
+                if !v.stages.is_empty() {
+                    if v.plan.len() > 1 {
+                        ui.add_space(3.0);
+                    }
+                    let names: Vec<&str> = v.stages.iter().map(|s| s.as_str()).collect();
+                    let h = if v.plan.len() > 1 { 20.0 } else { 26.0 };
+                    theme::stage_rail(ui, &names, v.at, tint, h, false);
+                }
+                theme::exit_note(ui, &v.exit, tint);
+            },
+        );
+    }
+
+    fn stage_view(&self) -> StageView {
+        let charge_stages = |mode: Mode, floats: bool| -> Vec<String> {
+            let mut v = vec!["pre-charge".to_string(), "bulk".into()];
+            match mode {
+                Mode::BulkOnly => {}
+                Mode::TopBalance => {
+                    v.push("absorb".into());
+                    v.push("balance".into());
+                }
+                Mode::Standard => v.push("absorb".into()),
+            }
+            v.push(if floats && mode != Mode::BulkOnly {
+                "float".into()
+            } else {
+                "done".into()
+            });
+            v
+        };
+        let Some(u) = self.last.as_ref().filter(|u| u.running) else {
+            return self.ended.clone().unwrap_or(StageView {
+                stages: charge_stages(self.mode, self.floats()),
+                ..StageView::default()
+            });
+        };
+        let plan = u.plan_labels.clone();
+        let plan_at = (!plan.is_empty()).then_some(u.step_index.min(plan.len() - 1));
+        if let Some((mode, phase)) = u.charge_stage {
+            let stages = charge_stages(mode, self.floats());
+            let want = phase.label();
+            let at = match phase {
+                Phase::Done(_) => Some(stages.len() - 1),
+                _ => stages.iter().position(|s| s == want),
+            };
+            let exit = match phase {
+                Phase::Precharge => {
+                    "feeding a small current until the pack is fit for a full one".to_string()
+                }
+                Phase::Bulk => format!(
+                    "constant {:.2} A until the pack reaches {:.2} V or a cell reaches {} mV",
+                    self.max_current, self.cv, self.target_mv
+                ),
+                Phase::Absorb => format!(
+                    "holding {:.2} V, ends when the current falls to {:.2} A and stays there",
+                    self.cv,
+                    self.stop_current()
+                ),
+                Phase::Balance => format!(
+                    "held at {} mV for the balancers, up to {:.0} h",
+                    self.ceiling_mv, self.hold_hours
+                ),
+                Phase::Float => format!("maintaining {:.2} V", self.float_v),
+                Phase::Done(_) => u.note.clone(),
+            };
+            return StageView {
+                plan,
+                plan_at,
+                stages,
+                at,
+                exit,
+                faulted: !u.note.is_empty() && matches!(phase, Phase::Done(_)),
+                done: false,
+            };
+        }
+        // A discharge and a rest have no stages of their own, so the plan
+        // rail is the whole story and a second rail would only invent one.
+        let exit = if u.step_label.starts_with("discharge") {
+            let blind = self
+                .last
+                .as_ref()
+                .and_then(|u| u.snapshot.as_ref())
+                .is_none_or(|s| !s.has_cells());
+            if blind {
+                format!(
+                    "{} {:.2} {} until the pack reaches {:.2} V",
+                    self.discharge_mode.label(),
+                    self.discharge_a,
+                    self.discharge_mode.unit(),
+                    self.pack_floor_v
+                )
+            } else {
+                format!(
+                    "{} {:.2} {} until the first cell reaches {} mV",
+                    self.discharge_mode.label(),
+                    self.discharge_a,
+                    self.discharge_mode.unit(),
+                    self.floor_mv
+                )
+            }
+        } else if u.step_label.starts_with("rest") {
+            "letting the pack settle before it is measured again".into()
+        } else {
+            u.note.clone()
+        };
+        StageView {
+            plan,
+            plan_at,
+            stages: Vec::new(),
+            at: None,
+            exit,
+            faulted: false,
+            done: false,
+        }
+    }
+
+    /// The comb. Every cell as a level in the window the pack is working in,
+    /// with the limits you set ruled across it, because the pack is only as
+    /// good as the cell nearest one of those rules.
+    fn cells_card(&mut self, ui: &mut egui::Ui, height: f32) {
+        let snapshot = self.last.as_ref().and_then(|u| u.snapshot.clone());
+        let cells: Vec<theme::Cell> = snapshot
+            .as_ref()
+            .map(|s| {
+                s.cells_mv
+                    .iter()
+                    .enumerate()
+                    .map(|(i, mv)| theme::Cell {
+                        mv: *mv,
+                        balancing: s.balancing.contains(&i),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.ease_cells(ui.ctx(), &cells);
+        let spread = snapshot.as_ref().map(|s| s.spread_mv()).unwrap_or(0);
+        let balancing = cells.iter().filter(|c| c.balancing).count();
+        theme::card(
+            ui,
+            None,
+            |ui| {
+                ui.label(theme::legend("cells"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!("{spread} mV"))
+                            .font(theme::figure(theme::VALUE_SIZE))
+                            .color(if spread > 100 {
+                                theme::READOUT
+                            } else {
+                                theme::VALUE
+                            }),
+                    );
+                    ui.label(theme::legend("spread"));
+                    if balancing > 0 {
+                        ui.add_space(10.0);
+                        ui.label(theme::legend(format!("{balancing} balancing")));
+                    }
+                });
+            },
+            |ui| {
+                theme::comb(
+                    ui,
+                    &cells,
+                    &self.shown_mv,
+                    self.ceiling_mv,
+                    self.target_mv,
+                    self.floor_mv,
+                    height,
+                );
+            },
+        );
+    }
+
+    /// Bars ease to the new reading rather than snapping to it, so a poll
+    /// that moves one cell reads as that cell moving.
+    fn ease_cells(&mut self, ctx: &egui::Context, cells: &[theme::Cell]) {
+        let now = Instant::now();
+        let dt = (now - self.shown_at).as_secs_f32().min(0.1);
+        self.shown_at = now;
+        self.shown_mv.resize(cells.len(), 0.0);
+        let k = 1.0 - (-dt / 0.06).exp();
+        let mut moving = false;
+        for (shown, cell) in self.shown_mv.iter_mut().zip(cells) {
+            let target = cell.mv as f32;
+            if *shown == 0.0 {
+                *shown = target;
+                continue;
+            }
+            if (target - *shown).abs() > 0.25 {
+                *shown += (target - *shown) * k;
+                moving = true;
+            } else {
+                *shown = target;
+            }
+        }
+        if moving {
+            ctx.request_repaint();
+        }
     }
 
     fn devices_card(&mut self, ui: &mut egui::Ui) {
@@ -1049,11 +1453,11 @@ impl App {
                 ui.add_enabled_ui(!busy, |ui| {
                     let text = if pending {
                         RichText::new("Connect")
-                            .size(theme::VALUE_SIZE)
+                            .font(theme::legend_font(theme::VALUE_SIZE + 0.5))
                             .color(theme::READOUT)
                             .strong()
                     } else {
-                        theme::value("Connect")
+                        theme::action("Connect")
                     };
                     if ui.button(text).clicked() {
                         reconnect = true;
@@ -1172,7 +1576,7 @@ impl App {
                     ),
                     theme::LEGEND,
                 );
-                if ui.button(theme::value("Apply to limits")).clicked() {
+                if ui.button(theme::action("Apply to limits")).clicked() {
                     apply = true;
                 }
             },
@@ -1242,12 +1646,22 @@ impl App {
                 ui.add_space(4.0);
                 let before = self.tuning();
                 field(ui, "max A", &mut self.max_current, 0.2..=10.0, 0.1, 2);
+                let cv_before = self.cv;
                 ui.add_enabled_ui(!locked, |ui| {
                     field(ui, "CV V", &mut self.cv, 1.0..=150.0, 0.1, 2);
                     if self.mode == Mode::Standard {
                         field(ui, "float V", &mut self.float_v, 1.0..=150.0, 0.1, 2);
                     }
                 });
+                // The setpoint is what full means on a pack with no gauge,
+                // so a change to it has to reach the estimate as well as the
+                // supply, or stopping at a state of charge aims at a figure
+                // the panel never shows.
+                if (self.cv - cv_before).abs() > f64::EPSILON {
+                    self.profile.set_charge_v(self.cv);
+                    self.ceiling_mv = self.profile.cell().ceiling_mv;
+                    self.send(Command::SetProfile(self.profile));
+                }
                 let mut term = self.stop_current();
                 field(ui, "stop A", &mut term, 0.05..=20.0, 0.05, 2);
                 if (term - self.stop_current()).abs() > f64::EPSILON {
@@ -1345,14 +1759,14 @@ impl App {
                     if ui
                         .add_enabled(
                             !pending && busy.is_none(),
-                            egui::Button::new(theme::value("Charge")),
+                            egui::Button::new(theme::action("Charge")),
                         )
                         .clicked()
                     {
                         self.send(Command::Start(self.plan(false)));
                     }
                     if ui
-                        .button(RichText::new("Stop").size(theme::VALUE_SIZE).color(theme::FAULT))
+                        .button(RichText::new("Stop").font(theme::legend_font(theme::VALUE_SIZE + 0.5)).color(theme::FAULT))
                         .clicked()
                     {
                         self.send(Command::Stop);
@@ -1408,18 +1822,25 @@ impl App {
                     .map(|u| u.load_modes.clone())
                     .filter(|m| !m.is_empty())
                     .unwrap_or_else(|| vec![LoadMode::Cc]);
-                egui::ComboBox::from_id_salt("load_mode")
-                    .selected_text(self.discharge_mode.label())
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for m in modes {
-                            ui.selectable_value(
-                                &mut self.discharge_mode,
-                                m,
-                                format!("{} ({})", m.label(), m.unit()),
-                            );
-                        }
-                    });
+                // What the load holds constant cannot change part way
+                // through: the amp-hours would be two tests added together.
+                // Everything under it can.
+                let running = self.discharging();
+                let before = self.load_tuning();
+                ui.add_enabled_ui(!running, |ui| {
+                    egui::ComboBox::from_id_salt("load_mode")
+                        .selected_text(self.discharge_mode.label())
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for m in modes {
+                                ui.selectable_value(
+                                    &mut self.discharge_mode,
+                                    m,
+                                    format!("{} ({})", m.label(), m.unit()),
+                                );
+                            }
+                        });
+                });
                 let (range, decimals) = match self.discharge_mode {
                     LoadMode::Cc => (0.1..=30.0, 2),
                     LoadMode::Cv => (1.0..=150.0, 1),
@@ -1447,6 +1868,10 @@ impl App {
                     &mut self.discharge_to_soc,
                     &mut self.target_soc,
                 );
+                let now = self.load_tuning();
+                if running && now != before {
+                    self.send(Command::TuneLoad(now));
+                }
                 theme::note(
                     ui,
                     match self.discharge_mode {
@@ -1467,7 +1892,7 @@ impl App {
                     if ui
                         .add_enabled(
                             !pending && busy.is_none(),
-                            egui::Button::new(theme::value("Discharge")),
+                            egui::Button::new(theme::action("Discharge")),
                         )
                         .clicked()
                     {
@@ -1476,7 +1901,7 @@ impl App {
                     if ui
                         .button(
                             RichText::new("Stop")
-                                .size(theme::VALUE_SIZE)
+                                .font(theme::legend_font(theme::VALUE_SIZE + 0.5))
                                 .color(theme::FAULT),
                         )
                         .clicked()
@@ -1558,7 +1983,7 @@ impl App {
                 if ui
                     .add_enabled(
                         busy.is_none(),
-                        egui::Button::new(theme::value("Run capacity test")),
+                        egui::Button::new(theme::action("Run capacity test")),
                     )
                     .clicked()
                 {
@@ -1601,7 +2026,7 @@ impl App {
         );
     }
 
-    fn pack_plot(&self, ui: &mut egui::Ui) {
+    fn pack_plot(&self, ui: &mut egui::Ui, height: f32) {
         // Scale to the pack, not to the data: auto-scaling a resting battery
         // turns 20 mV of noise into a mountain range. The window runs from the
         // discharge floor to just past the charge ceiling.
@@ -1616,15 +2041,18 @@ impl App {
                     .map(|s| s.cells_mv.len())
             })
             .unwrap_or(0);
-        let (v_lo, v_hi) = if cells > 0 {
-            let n = cells as f64;
-            (
-                n * self.floor_mv as f64 / 1000.0,
-                (n * (self.ceiling_mv + 60) as f64 / 1000.0).max(self.cv + 0.5),
-            )
+        // A pack with no BMS reports no cells, but the profile still knows
+        // how many are in there, and a window from zero to sixty volts turns
+        // a 4S charge into a flat line across the bottom.
+        let n = if cells > 0 {
+            cells
         } else {
-            (0.0, 60.0)
-        };
+            self.profile.series.max(1) as usize
+        } as f64;
+        let (v_lo, v_hi) = (
+            (n * self.floor_mv as f64 / 1000.0).min(self.pack_floor_v),
+            (n * (self.ceiling_mv + 60) as f64 / 1000.0).max(self.cv + 0.5),
+        );
         let a_max = self.max_current.max(self.discharge_a).max(1.0) * 1.15;
 
         let volts = chart::Trace {
@@ -1645,7 +2073,7 @@ impl App {
         };
         chart::strip(
             ui,
-            CHART_H,
+            height,
             &chart::Axis {
                 label: "V",
                 lo: v_lo,
@@ -1662,7 +2090,7 @@ impl App {
         );
     }
 
-    fn cell_plot(&self, ui: &mut egui::Ui) {
+    fn cell_plot(&self, ui: &mut egui::Ui, height: f32) {
         let n = self
             .history
             .back()
@@ -1698,7 +2126,7 @@ impl App {
             .collect();
         chart::strip(
             ui,
-            CHART_H,
+            height,
             &chart::Axis {
                 label: "mV",
                 lo: lo - pad,
@@ -1778,51 +2206,6 @@ fn field(
         );
         ui.label(theme::legend(label));
     });
-}
-
-fn cells_table(ui: &mut egui::Ui, s: &Snapshot, ceiling: u16) {
-    let (lo, hi) = (s.low_mv(), s.high_mv());
-    let width = s.cells_mv.len().saturating_sub(1).to_string().len();
-    egui::Grid::new("cell_table")
-        .spacing(egui::vec2(8.0, 3.0))
-        .show(ui, |ui| {
-            for (i, mv) in s.cells_mv.iter().enumerate() {
-                ui.label(
-                    RichText::new(format!("c{i:0width$}"))
-                        .font(theme::mono(11.0))
-                        .color(theme::LEGEND),
-                );
-                let tint = if *mv >= ceiling {
-                    theme::FAULT
-                } else if *mv >= ceiling.saturating_sub(50) {
-                    theme::READOUT
-                } else {
-                    theme::VALUE
-                };
-                ui.label(
-                    RichText::new(format!("{mv}"))
-                        .font(theme::mono(12.0))
-                        .color(tint),
-                );
-                ui.label(
-                    RichText::new(format!("+{:<3}", mv - lo))
-                        .font(theme::mono(11.0))
-                        .color(theme::LEGEND),
-                );
-                let frac = if hi > lo {
-                    (*mv - lo) as f32 / (hi - lo) as f32
-                } else {
-                    0.04
-                };
-                theme::bar(ui, frac, tint, 120.0);
-                ui.label(if s.balancing.contains(&i) {
-                    RichText::new("bal").size(10.5).color(theme::OK)
-                } else {
-                    RichText::new("")
-                });
-                ui.end_row();
-            }
-        });
 }
 
 /// The supply is switched off from `Drop`, which a signal does not run, so the
