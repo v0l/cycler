@@ -794,12 +794,6 @@ impl App {
     }
 
     fn profile_card(&mut self, ui: &mut egui::Ui) {
-        let blind = self
-            .last
-            .as_ref()
-            .and_then(|u| u.snapshot.as_ref())
-            .map(|s| !s.has_cells())
-            .unwrap_or(false);
         let mut apply = false;
         let capacity = self.capacity_ah();
         let snapshot = self.last.as_ref().and_then(|u| u.snapshot.clone());
