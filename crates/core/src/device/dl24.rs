@@ -78,8 +78,8 @@ pub struct Counters {
     pub volts: f64,
     pub amps: f64,
     pub watts: f64,
-    /// What the load is seeing, in hundredths of an ohm. It reads 99999.91
-    /// with nothing flowing, which is the figure on the front panel.
+    /// What the load is seeing. The field is thousandths of an ohm, and it
+    /// pegs at 9999.991 with nothing flowing.
     pub ohms: f64,
     pub watt_hours: f64,
     pub amp_hours: f64,
@@ -120,7 +120,7 @@ pub fn decode_counters(resp: &[u8]) -> Option<Counters> {
         volts: u16le(p, 4) as f64 / 1000.0,
         amps: u16le(p, 8) as f64 / 1000.0,
         watts: u16le(p, 12) as f64 / 1000.0,
-        ohms: u32le(p, 16) as f64 / 100.0,
+        ohms: u32le(p, 16) as f64 / 1000.0,
         watt_hours: u32le(p, 20) as f64 / 1000.0,
         amp_hours: u32le(p, 24) as f64 / 1_000_000.0,
         runtime_s: u32le(p, 28) as f64 / 12.0,
@@ -412,7 +412,7 @@ mod tests {
         let c = decode_counters(&hex(COUNTERS)).expect("counters");
         assert!((c.volts - 51.533).abs() < 1e-9);
         assert_eq!(c.amps, 0.0);
-        assert!((c.ohms - 99999.91).abs() < 1e-9);
+        assert!((c.ohms - 9999.991).abs() < 1e-9);
         assert!((c.watt_hours - 69.883).abs() < 1e-9);
         assert!((c.amp_hours - 3.722786).abs() < 1e-9);
         assert!((c.mosfet_temp_c - 27.619).abs() < 1e-9);
