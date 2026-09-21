@@ -161,6 +161,17 @@ impl App {
         }
     }
 
+    /// The capacity to size test currents from: the BMS's rating when it has
+    /// one, otherwise the profile's own arithmetic.
+    fn capacity_ah(&self) -> f64 {
+        self.last
+            .as_ref()
+            .and_then(|u| u.snapshot.as_ref())
+            .and_then(|s| s.rated_ah)
+            .filter(|ah| *ah > 0.0)
+            .unwrap_or_else(|| self.profile.capacity_ah())
+    }
+
     /// Whether the connected pack reports cells at all.
     fn blind(&self) -> bool {
         self.last
@@ -205,8 +216,9 @@ impl App {
         self.floor_mv = cell.floor_mv;
         self.pack_floor_v = self.profile.floor_v();
         // A gentle test: fill and empty at a fifth of capacity.
-        self.max_current = self.profile.current_at_c(0.2);
-        self.discharge_a = self.profile.current_at_c(0.2);
+        let gentle = (self.capacity_ah() * 0.2).max(0.1);
+        self.max_current = gentle;
+        self.discharge_a = gentle;
     }
 
     fn drain(&mut self) {
@@ -227,6 +239,11 @@ impl App {
             if let Some(s) = u.snapshot.as_ref() {
                 if s.has_cells() {
                     self.profile.observe_cells(s.cells_mv.len());
+                    if !self.series_detected
+                        && let Some(c) = Chemistry::from_cell_mv(s.high_mv())
+                    {
+                        self.profile.chemistry = c;
+                    }
                     self.series_detected = true;
                 } else if !self.series_detected && s.pack_v > 1.0 {
                     // No BMS: a resting voltage is the only clue to how many
@@ -784,7 +801,10 @@ impl App {
             .map(|s| !s.has_cells())
             .unwrap_or(false);
         let mut apply = false;
-        let capacity = self.profile.capacity_ah();
+        let capacity = self.capacity_ah();
+        let snapshot = self.last.as_ref().and_then(|u| u.snapshot.clone());
+        let from_bms = snapshot.as_ref().map(|s| s.has_cells()).unwrap_or(false);
+        let rated_ah = snapshot.as_ref().and_then(|s| s.rated_ah).filter(|a| *a > 0.0);
         theme::card(
             ui,
             None,
@@ -795,6 +815,9 @@ impl App {
                 });
             },
             |ui| {
+                // A BMS reports its cells and often its rating; it never
+                // reports chemistry. So that is the only thing left to choose
+                // when one is connected.
                 egui::ComboBox::from_id_salt("chemistry")
                     .selected_text(self.profile.chemistry.label())
                     .width(ui.available_width().max(0.0))
@@ -803,24 +826,37 @@ impl App {
                             ui.selectable_value(&mut self.profile.chemistry, c, c.label());
                         }
                     });
-                let mut series = self.profile.series as f64;
-                let mut parallel = self.profile.parallel as f64;
-                if blind || !self.series_detected {
-                    field(ui, "series", &mut series, 1.0..=64.0, 1.0, 0);
-                    self.profile.series = series as u16;
-                } else {
+                if from_bms {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("{}S", self.profile.series))
                                 .size(theme::VALUE_SIZE)
                                 .color(theme::VALUE),
                         );
+                        if let Some(ah) = rated_ah {
+                            ui.label(
+                                RichText::new(format!("{ah:.0} Ah"))
+                                    .size(theme::VALUE_SIZE)
+                                    .color(theme::VALUE),
+                            );
+                        }
                         ui.label(theme::legend("from the bms"));
                     });
+                    if rated_ah.is_none() {
+                        let mut parallel = self.profile.parallel as f64;
+                        field(ui, "parallel", &mut parallel, 1.0..=32.0, 1.0, 0);
+                        self.profile.parallel = parallel as u16;
+                        field(ui, "cell Ah", &mut self.profile.cell_ah, 0.5..=1000.0, 1.0, 1);
+                    }
+                } else {
+                    let mut series = self.profile.series as f64;
+                    field(ui, "series", &mut series, 1.0..=64.0, 1.0, 0);
+                    self.profile.series = series as u16;
+                    let mut parallel = self.profile.parallel as f64;
+                    field(ui, "parallel", &mut parallel, 1.0..=32.0, 1.0, 0);
+                    self.profile.parallel = parallel as u16;
+                    field(ui, "cell Ah", &mut self.profile.cell_ah, 0.5..=1000.0, 1.0, 1);
                 }
-                field(ui, "parallel", &mut parallel, 1.0..=32.0, 1.0, 0);
-                self.profile.parallel = parallel as u16;
-                field(ui, "cell Ah", &mut self.profile.cell_ah, 0.5..=1000.0, 1.0, 1);
                 theme::note(
                     ui,
                     format!(

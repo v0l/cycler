@@ -95,6 +95,19 @@ impl Chemistry {
         }
     }
 
+    /// The chemistry a resting cell voltage belongs to. Only a suggestion: a
+    /// BMS reports cells, never what they are made of, and a flat LiFePO4 cell
+    /// and a mid-charge lead-acid cell read alike.
+    pub fn from_cell_mv(mv: u16) -> Option<Self> {
+        match mv {
+            1600..=2100 => Some(Chemistry::LeadAcid),
+            2150..=2850 => Some(Chemistry::Lto),
+            2900..=3550 => Some(Chemistry::LiFePo4),
+            3560..=4250 => Some(Chemistry::LiIon),
+            _ => None,
+        }
+    }
+
     /// Series count that best explains a measured pack voltage, for a first
     /// guess when there is no BMS to ask.
     pub fn series_from_voltage(self, volts: f64) -> u16 {
@@ -213,6 +226,15 @@ mod tests {
         assert_eq!(Chemistry::LiFePo4.series_from_voltage(51.2), 16);
         assert_eq!(Chemistry::LeadAcid.series_from_voltage(12.6), 6);
         assert_eq!(Chemistry::LiIon.series_from_voltage(44.4), 12);
+    }
+
+    #[test]
+    fn a_cell_voltage_suggests_a_chemistry() {
+        assert_eq!(Chemistry::from_cell_mv(3320), Some(Chemistry::LiFePo4));
+        assert_eq!(Chemistry::from_cell_mv(3950), Some(Chemistry::LiIon));
+        assert_eq!(Chemistry::from_cell_mv(2300), Some(Chemistry::Lto));
+        assert_eq!(Chemistry::from_cell_mv(2050), Some(Chemistry::LeadAcid));
+        assert_eq!(Chemistry::from_cell_mv(900), None);
     }
 
     #[test]
