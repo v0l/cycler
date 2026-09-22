@@ -1,6 +1,5 @@
 mod chart;
 mod devices;
-mod theme;
 mod worker;
 
 use cycler_core::charge::{Config, Mode, Phase};
@@ -12,6 +11,10 @@ use cycler_core::device::{CHARGER_BACKENDS, LOAD_BACKENDS};
 use cycler_core::pack::PACK_BACKENDS;
 use devices::{Choice, Remembered};
 use egui::{Color32, RichText};
+use egui_bench::prelude::{
+    action, card, exit_note, hero, lamp, legend, note, readouts, stage_rail, theme, toggle, Channel,
+    Comb,
+};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -577,7 +580,7 @@ impl eframe::App for App {
 
         egui::Panel::top("head")
             .frame(egui::Frame::NONE.fill(theme::WELL).inner_margin(8))
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("CYCLER")
@@ -586,7 +589,7 @@ impl eframe::App for App {
                             .color(theme::VALUE),
                     );
                     if let Some(p) = &self.log {
-                        ui.label(theme::legend(format!("logging {}", p.display())));
+                        ui.label(legend(format!("logging {}", p.display())));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(e) = &self.error {
@@ -602,14 +605,14 @@ impl eframe::App for App {
                                 theme::TRACE
                             };
                             ui.label(RichText::new(format!("{hi} mV")).font(theme::figure(13.0)).color(tint));
-                            ui.label(theme::legend("highest cell"));
+                            ui.label(legend("highest cell"));
                             ui.add_space(10.0);
                             ui.label(
                                 RichText::new(format!("{lo} mV"))
                                     .font(theme::figure(13.0))
                                     .color(theme::TRACE),
                             );
-                            ui.label(theme::legend("lowest cell"));
+                            ui.label(legend("lowest cell"));
                         }
                     });
                 });
@@ -619,7 +622,7 @@ impl eframe::App for App {
             .exact_size(300.0)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(theme::CHASSIS).inner_margin(8))
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 self.devices_card(ui);
                 self.profile_card(ui);
@@ -630,7 +633,7 @@ impl eframe::App for App {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::CHASSIS).inner_margin(8))
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
                 self.stage_card(ui);
                 self.battery_card(ui);
@@ -727,7 +730,7 @@ impl App {
             .as_ref()
             .and_then(|u| u.measured_ah)
             .unwrap_or(0.0);
-        theme::card(
+        card(
             ui,
             rail,
             |ui| {
@@ -735,13 +738,13 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let alarms = snapshot.as_ref().map(|s| s.alarms.len()).unwrap_or(0);
                     if alarms > 0 {
-                        theme::lamp(ui, &format!("{alarms} alarm"), true, true);
+                        lamp(ui, &format!("{alarms} alarm"), true, true);
                     }
                     let state = snapshot
                         .as_ref()
                         .map(|s| s.state_label())
                         .unwrap_or("offline");
-                    theme::lamp(ui, state, state == "charging" || state == "discharging", false);
+                    lamp(ui, state, state == "charging" || state == "discharging", false);
                 });
             },
             |ui| match &snapshot {
@@ -749,9 +752,9 @@ impl App {
                     // Nothing here comes from the battery: it is whatever the
                     // charger or load can see at the terminals.
                     ui.horizontal(|ui| {
-                        theme::hero(ui, "pack", &format!("{:.3}", s.pack_v), "V", theme::TRACE);
+                        hero(ui, "pack", &format!("{:.3}", s.pack_v), "V", theme::TRACE);
                     });
-                    theme::readouts(
+                    readouts(
                         ui,
                         &[
                             ("current", format!("{:+.3} A", s.current_a), theme::TRACE),
@@ -763,7 +766,7 @@ impl App {
                             ("soc est", format!("{}%", s.soc), theme::READOUT),
                         ],
                     );
-                    theme::note(
+                    note(
                         ui,
                         format!(
                             "No BMS: read by the {}. SOC is estimated from {} voltage and \
@@ -776,9 +779,9 @@ impl App {
                 }
                 Some(s) => {
                     ui.horizontal(|ui| {
-                        theme::hero(ui, "pack", &format!("{:.3}", s.pack_v), "V", theme::TRACE);
+                        hero(ui, "pack", &format!("{:.3}", s.pack_v), "V", theme::TRACE);
                     });
-                    theme::readouts(
+                    readouts(
                         ui,
                         &[
                             ("current", format!("{:+.3} A", s.current_a), theme::TRACE),
@@ -839,7 +842,7 @@ impl App {
                                 a.to_lowercase().contains(&i.trim().to_lowercase())
                                     && !i.trim().is_empty()
                             });
-                            theme::note(
+                            note(
                                 ui,
                                 if skipped {
                                     format!("{a} (ignored)")
@@ -852,7 +855,7 @@ impl App {
                     }
                 }
                 None => {
-                    ui.label(theme::legend("waiting for the first cell read"));
+                    ui.label(legend("waiting for the first cell read"));
                 }
             },
         );
@@ -872,7 +875,7 @@ impl App {
         let seen = last.as_ref().and_then(|u| u.charger).map(|(v, _)| v);
         let mismatch = on && seen.is_some_and(|v| cycler_core::agree::disagrees(pack_v, v));
         let unseen = on && pack_v > 0.5 && seen.is_some_and(|v| v <= 0.5);
-        theme::card(
+        card(
             ui,
             Some(if mismatch || unseen {
                 theme::FAULT
@@ -882,19 +885,19 @@ impl App {
                 theme::ETCH
             }),
             |ui| {
-                ui.label(theme::legend("charger"));
+                ui.label(legend("charger"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(r) = last.as_ref().and_then(|u| u.charger_regulation)
                         && on
                     {
-                        ui.label(theme::legend(r.label()));
+                        ui.label(legend(r.label()));
                     }
                     if mismatch {
-                        theme::lamp(ui, "wrong battery?", true, true);
+                        lamp(ui, "wrong battery?", true, true);
                     } else if unseen {
-                        theme::lamp(ui, "no battery seen", true, true);
+                        lamp(ui, "no battery seen", true, true);
                     }
-                    theme::lamp(
+                    lamp(
                         ui,
                         if on { "output on" } else { "output off" },
                         on,
@@ -905,7 +908,7 @@ impl App {
             |ui| {
                 let (v, a) = last.as_ref().and_then(|u| u.charger).unwrap_or((0.0, 0.0));
                 if mismatch {
-                    theme::note(
+                    note(
                         ui,
                         format!(
                             "supply sees {v:.2} V, battery reads {pack_v:.2} V: \
@@ -914,14 +917,14 @@ impl App {
                         theme::FAULT,
                     );
                 } else if unseen {
-                    theme::note(
+                    note(
                         ui,
                         "output on and no voltage at the terminals: check the leads and fuse.",
                         theme::FAULT,
                     );
                 }
                 if disagrees {
-                    theme::note(
+                    note(
                         ui,
                         format!(
                             "supply says {}, controller wants {}",
@@ -931,7 +934,7 @@ impl App {
                         theme::FAULT,
                     );
                 }
-                theme::readouts(
+                readouts(
                     ui,
                     &[
                         ("out", format!("{v:.3} V"), theme::TRACE),
@@ -957,7 +960,7 @@ impl App {
                 } else {
                     ("ceiling", "holding")
                 };
-                theme::readouts(
+                readouts(
                     ui,
                     &[
                         (v_label, format!("{set_v:.2} V"), theme::READOUT),
@@ -979,7 +982,7 @@ impl App {
                     && !u.note.is_empty()
                     && u.step_label.starts_with("charge")
                 {
-                    theme::note(ui, u.note.clone(), theme::READOUT);
+                    note(ui, u.note.clone(), theme::READOUT);
                 }
             },
         );
@@ -998,7 +1001,7 @@ impl App {
             .map(|l| cycler_core::agree::disagrees(pack_v_hdr, l.volts))
             .unwrap_or(false);
         let unseen = on && pack_v_hdr > 0.5 && load.map(|l| l.volts <= 0.5).unwrap_or(false);
-        theme::card(
+        card(
             ui,
             Some(if mismatch {
                 theme::FAULT
@@ -1008,14 +1011,14 @@ impl App {
                 theme::ETCH
             }),
             |ui| {
-                ui.label(theme::legend("load"));
+                ui.label(legend("load"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if mismatch {
-                        theme::lamp(ui, "wrong battery?", true, true);
+                        lamp(ui, "wrong battery?", true, true);
                     } else if unseen {
-                        theme::lamp(ui, "no battery seen", true, true);
+                        lamp(ui, "no battery seen", true, true);
                     }
-                    theme::lamp(
+                    lamp(
                         ui,
                         if on { "load on" } else { "load off" },
                         on,
@@ -1041,14 +1044,14 @@ impl App {
                         .and_then(|u| u.snapshot.as_ref())
                         .map(|s| s.pack_v)
                         .unwrap_or(0.0);
-                    theme::readouts(
+                    readouts(
                         ui,
                         &[
                             ("draw", format!("{draw_a:.3} A"), theme::TRACE),
                             ("power", format!("{:.2} W", draw_a * volts), theme::TRACE),
                         ],
                     );
-                    theme::note(
+                    note(
                         ui,
                         "Switched by hand: cycler measures and warns, it cannot cut off.",
                         theme::READOUT,
@@ -1076,7 +1079,7 @@ impl App {
                         None if l.amps.abs() > 0.001 => format!("{:.2} R", l.volts / l.amps),
                         None => "open".into(),
                     };
-                    theme::readouts(
+                    readouts(
                         ui,
                         &[
                             (
@@ -1100,7 +1103,7 @@ impl App {
                         let held = format!("{:.3} {}", l.setpoint, mode.unit());
                         let disagrees =
                             (l.setpoint - d.load_value).abs() > (d.load_value * 0.02).max(0.01);
-                        theme::readouts(
+                        readouts(
                             ui,
                             &[
                                 ("mode", mode.label().to_string(), theme::READOUT),
@@ -1122,7 +1125,7 @@ impl App {
                             ],
                         );
                         if disagrees {
-                            theme::note(
+                            note(
                                 ui,
                                 format!(
                                     "Load says it is holding {:.3} {}, not the {:.3} it was \
@@ -1136,7 +1139,7 @@ impl App {
                         }
                     }
                     if wrong_battery {
-                        theme::note(
+                        note(
                             ui,
                             format!(
                                 "Load sees {:.2} V, pack is {pack_v:.2} V. Different battery, \
@@ -1153,7 +1156,7 @@ impl App {
                     );
                 }
                 None => {
-                    ui.label(theme::legend("not connected"));
+                    ui.label(legend("not connected"));
                 }
             },
         );
@@ -1165,16 +1168,16 @@ impl App {
             self.trace = Trace::Pack;
         }
         let mut trace = self.trace;
-        theme::card(
+        card(
             ui,
             None,
             |ui| {
-                ui.label(theme::legend("history"));
+                ui.label(legend("history"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if cells {
-                        ui.selectable_value(&mut trace, Trace::Cells, theme::legend("cells"));
+                        ui.selectable_value(&mut trace, Trace::Cells, legend("cells"));
                     }
-                    ui.selectable_value(&mut trace, Trace::Pack, theme::legend("pack"));
+                    ui.selectable_value(&mut trace, Trace::Pack, legend("pack"));
                 });
             },
             |ui| match self.trace {
@@ -1203,18 +1206,18 @@ impl App {
             .as_ref()
             .filter(|u| u.running && u.plan_repeat > 1)
             .map(|u| format!("cycle {} of {}", u.cycle + 1, u.plan_repeat));
-        theme::card(
+        card(
             ui,
             live.then_some(tint),
             |ui| {
-                ui.label(theme::legend(match (live, v.done) {
+                ui.label(legend(match (live, v.done) {
                     (_, true) => "last run",
                     (true, _) => "running",
                     _ => "idle",
                 }));
                 if let Some(c) = &cycles {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(theme::legend(c));
+                        ui.label(legend(c));
                     });
                 }
             },
@@ -1224,7 +1227,7 @@ impl App {
                 // stage, so neither has to stand for the other.
                 if v.plan.len() > 1 {
                     let names: Vec<&str> = v.plan.iter().map(|s| s.as_str()).collect();
-                    theme::stage_rail(ui, &names, v.plan_at, tint, 26.0, !v.stages.is_empty());
+                    stage_rail(ui, &names, v.plan_at, tint, 26.0, !v.stages.is_empty());
                 }
                 if !v.stages.is_empty() {
                     if v.plan.len() > 1 {
@@ -1232,9 +1235,9 @@ impl App {
                     }
                     let names: Vec<&str> = v.stages.iter().map(|s| s.as_str()).collect();
                     let h = if v.plan.len() > 1 { 20.0 } else { 26.0 };
-                    theme::stage_rail(ui, &names, v.at, tint, h, false);
+                    stage_rail(ui, &names, v.at, tint, h, false);
                 }
-                theme::exit_note(ui, &v.exit, tint);
+                exit_note(ui, &v.exit, tint);
             },
         );
     }
@@ -1348,27 +1351,27 @@ impl App {
     /// good as the cell nearest one of those rules.
     fn cells_card(&mut self, ui: &mut egui::Ui, height: f32) {
         let snapshot = self.last.as_ref().and_then(|u| u.snapshot.clone());
-        let cells: Vec<theme::Cell> = snapshot
+        let cells: Vec<Channel> = snapshot
             .as_ref()
             .map(|s| {
                 s.cells_mv
                     .iter()
                     .enumerate()
-                    .map(|(i, mv)| theme::Cell {
-                        mv: *mv,
-                        balancing: s.balancing.contains(&i),
+                    .map(|(i, mv)| Channel {
+                        value: *mv as f32,
+                        marked: s.balancing.contains(&i),
                     })
                     .collect()
             })
             .unwrap_or_default();
         self.ease_cells(ui.ctx(), &cells);
         let spread = snapshot.as_ref().map(|s| s.spread_mv()).unwrap_or(0);
-        let balancing = cells.iter().filter(|c| c.balancing).count();
-        theme::card(
+        let balancing = cells.iter().filter(|c| c.marked).count();
+        card(
             ui,
             None,
             |ui| {
-                ui.label(theme::legend("cells"));
+                ui.label(legend("cells"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(format!("{spread} mV"))
@@ -1379,22 +1382,24 @@ impl App {
                                 theme::VALUE
                             }),
                     );
-                    ui.label(theme::legend("spread"));
+                    ui.label(legend("spread"));
                     if balancing > 0 {
                         ui.add_space(10.0);
-                        ui.label(theme::legend(format!("{balancing} balancing")));
+                        ui.label(legend(format!("{balancing} balancing")));
                     }
                 });
             },
             |ui| {
-                theme::comb(
-                    ui,
-                    &cells,
-                    &self.shown_mv,
-                    self.ceiling_mv,
-                    self.target_mv,
-                    self.floor_mv,
-                    height,
+                ui.add(
+                    Comb::new(&cells)
+                        .animated(&self.shown_mv)
+                        .rule("ceiling", self.ceiling_mv as f32)
+                        .rule("target", self.target_mv as f32)
+                        .rule("floor", self.floor_mv as f32)
+                        .fault_above(self.ceiling_mv as f32)
+                        .prefix("c")
+                        .empty("no cells reported")
+                        .height(height),
                 );
             },
         );
@@ -1402,7 +1407,7 @@ impl App {
 
     /// Bars ease to the new reading rather than snapping to it, so a poll
     /// that moves one cell reads as that cell moving.
-    fn ease_cells(&mut self, ctx: &egui::Context, cells: &[theme::Cell]) {
+    fn ease_cells(&mut self, ctx: &egui::Context, cells: &[Channel]) {
         let now = Instant::now();
         let dt = (now - self.shown_at).as_secs_f32().min(0.1);
         self.shown_at = now;
@@ -1410,7 +1415,7 @@ impl App {
         let k = 1.0 - (-dt / 0.06).exp();
         let mut moving = false;
         for (shown, cell) in self.shown_mv.iter_mut().zip(cells) {
-            let target = cell.mv as f32;
+            let target = cell.value;
             if *shown == 0.0 {
                 *shown = target;
                 continue;
@@ -1441,11 +1446,11 @@ impl App {
         let scanning_any = self.pack_pick.scanning()
             || self.charger_pick.scanning()
             || self.load_pick.scanning();
-        theme::card(
+        card(
             ui,
             None,
             |ui| {
-                ui.label(theme::legend("devices"));
+                ui.label(legend("devices"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("rescan").clicked() {
                         header_rescan = true;
@@ -1459,7 +1464,7 @@ impl App {
                     &mut self.load_pick,
                 ] {
                     ui.horizontal(|ui| {
-                        ui.label(theme::legend(pick.role));
+                        ui.label(legend(pick.role));
                         if pick.role != "battery" {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1491,7 +1496,7 @@ impl App {
                     if pick.scanning() {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(12.0));
-                            ui.label(theme::legend("scanning"));
+                            ui.label(legend("scanning"));
                         });
                         ui.add_space(4.0);
                         continue;
@@ -1537,7 +1542,7 @@ impl App {
                             .color(theme::READOUT)
                             .strong()
                     } else {
-                        theme::action("Connect")
+                        action("Connect")
                     };
                     if ui.button(text).clicked() {
                         reconnect = true;
@@ -1547,7 +1552,7 @@ impl App {
                     // Changing a dropdown does nothing until the session is
                     // reopened, and a stale session looks exactly like a
                     // device that will not start.
-                    theme::note(
+                    note(
                         ui,
                         "Selection changed: press Connect to use it.",
                         theme::READOUT,
@@ -1576,13 +1581,13 @@ impl App {
         let snapshot = self.last.as_ref().and_then(|u| u.snapshot.clone());
         let from_bms = snapshot.as_ref().map(|s| s.has_cells()).unwrap_or(false);
         let rated_ah = snapshot.as_ref().and_then(|s| s.rated_ah).filter(|a| *a > 0.0);
-        theme::card(
+        card(
             ui,
             None,
             |ui| {
-                ui.label(theme::legend("battery"));
+                ui.label(legend("battery"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(theme::legend(format!("{capacity:.0} Ah")));
+                    ui.label(legend(format!("{capacity:.0} Ah")));
                 });
             },
             |ui| {
@@ -1617,7 +1622,7 @@ impl App {
                                     .color(theme::VALUE),
                             );
                         }
-                        ui.label(theme::legend("from the bms"));
+                        ui.label(legend("from the bms"));
                     });
                     if rated_ah.is_none() {
                         let mut parallel = self.profile.parallel as f64;
@@ -1637,14 +1642,14 @@ impl App {
                 field(ui, "charge C", &mut self.charge_c, 0.01..=3.0, 0.05, 2);
                 field(ui, "discharge C", &mut self.discharge_c, 0.01..=3.0, 0.05, 2);
                 if self.profile.chemistry == Chemistry::LeadAcid {
-                    theme::note(
+                    note(
                         ui,
                         "Lead-acid capacity is quoted at the 20 hour rate, so C/20 out is \
                          what the rating on the label means. Above C/10 in it gasses.",
                         theme::LEGEND,
                     );
                 }
-                theme::note(
+                note(
                     ui,
                     format!(
                         "{:.2} V charge, {:.2} V float, {:.2} V floor, {:.2} A in, {:.2} A out",
@@ -1656,7 +1661,7 @@ impl App {
                     ),
                     theme::LEGEND,
                 );
-                if ui.button(theme::action("Apply to limits")).clicked() {
+                if ui.button(action("Apply to limits")).clicked() {
                     apply = true;
                 }
             },
@@ -1680,18 +1685,18 @@ impl App {
             .as_ref()
             .map(|u| u.running && u.step_label.starts_with("charge"))
             .unwrap_or(false);
-        theme::card(
+        card(
             ui,
             Some(if wanted { theme::OK } else { theme::ETCH }),
             |ui| {
-                ui.label(theme::legend("charge"));
+                ui.label(legend("charge"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    theme::lamp(ui, if wanted { "charging" } else { "idle" }, wanted, false);
+                    lamp(ui, if wanted { "charging" } else { "idle" }, wanted, false);
                 });
             },
             |ui| {
                 if !self.has_charger() {
-                    theme::note(ui, self.missing("charger"), theme::FAULT);
+                    note(ui, self.missing("charger"), theme::FAULT);
                     return;
                 }
                 // What the stages mean, and what the cells are held to, is
@@ -1712,7 +1717,7 @@ impl App {
                             ui.selectable_value(&mut self.mode, Mode::BulkOnly, "Bulk only");
                         });
                 });
-                theme::note(
+                note(
                     ui,
                     match self.mode {
                         Mode::Standard => {
@@ -1747,13 +1752,13 @@ impl App {
                 if (term - self.stop_current()).abs() > f64::EPSILON {
                     self.i_term = Some(term);
                 }
-                theme::note(
+                note(
                     ui,
                     "Absorption ends when the pack stops taking this much: C/20 by default.",
                     theme::LEGEND,
                 );
                 if self.blind() {
-                    theme::note(
+                    note(
                         ui,
                         "No BMS: the CV setpoint is the ceiling, and the stop current ends it.",
                         theme::LEGEND,
@@ -1766,12 +1771,12 @@ impl App {
                     });
                 }
                 soc_stop(ui, "stop at soc", &mut self.charge_to_soc, &mut self.target_soc);
-                if theme::toggle(ui, "stop on bms alarm", self.stop_on_alarm).clicked() {
+                if toggle(ui, "stop on bms alarm", self.stop_on_alarm).clicked() {
                     self.stop_on_alarm = !self.stop_on_alarm;
                 }
                 if self.stop_on_alarm {
                     ui.horizontal(|ui| {
-                        ui.label(theme::legend("except"));
+                        ui.label(legend("except"));
                         ui.add_sized(
                             [150.0, 18.0],
                             egui::TextEdit::singleline(&mut self.alarm_ignore_list)
@@ -1779,7 +1784,7 @@ impl App {
                         );
                     });
                 } else {
-                    theme::note(
+                    note(
                         ui,
                         "The pack's own protection is the only instrument wired to every \
                          cell. Charging through it is your call.",
@@ -1788,7 +1793,7 @@ impl App {
                 }
                 if self.mode != Mode::BulkOnly {
                     field(ui, "absorb h", &mut self.absorb_hours, 0.5..=24.0, 0.5, 1);
-                    theme::note(
+                    note(
                         ui,
                         "Longest absorption before it gives up waiting for the stop current.",
                         theme::LEGEND,
@@ -1803,14 +1808,14 @@ impl App {
                     field(ui, "hold h", &mut self.hold_hours, 1.0..=72.0, 1.0, 0);
                 } else if self.floats() {
                     field(ui, "float h", &mut self.hold_hours, 1.0..=72.0, 1.0, 0);
-                    theme::note(
+                    note(
                         ui,
                         "Lead-acid: held at the float voltage this long after terminating.",
                         theme::LEGEND,
                     );
                 }
                 if locked {
-                    theme::note(
+                    note(
                         ui,
                         "Charging: currents and clocks are live, the voltages and the mode \
                          are settled until it stops.",
@@ -1825,7 +1830,7 @@ impl App {
                 ui.add_space(6.0);
                 let pending = self.pending_connect();
                 if pending {
-                    theme::note(
+                    note(
                         ui,
                         "Devices changed: press Connect before starting.",
                         theme::READOUT,
@@ -1833,13 +1838,13 @@ impl App {
                 }
                 let busy = self.busy().filter(|_| !self.charging());
                 if let Some(what) = &busy {
-                    theme::note(ui, format!("{what}: stop it to charge."), theme::LEGEND);
+                    note(ui, format!("{what}: stop it to charge."), theme::LEGEND);
                 }
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
                             !pending && busy.is_none(),
-                            egui::Button::new(theme::action("Charge")),
+                            egui::Button::new(action("Charge")),
                         )
                         .clicked()
                     {
@@ -1863,30 +1868,30 @@ impl App {
             .map(|u| u.running && u.step_label.starts_with("discharge"))
             .unwrap_or(false);
         let manual = last.as_ref().is_some_and(|u| u.load_manual);
-        theme::card(
+        card(
             ui,
             Some(if wanted { theme::OK } else { theme::ETCH }),
             |ui| {
-                ui.label(theme::legend("discharge"));
+                ui.label(legend("discharge"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = match (wanted, manual) {
                         (true, true) => "connect load",
                         (true, false) => "discharging",
                         (false, _) => "idle",
                     };
-                    theme::lamp(ui, label, wanted, false);
+                    lamp(ui, label, wanted, false);
                 });
             },
             |ui| {
                 if !self.has_load() {
-                    theme::note(ui, self.missing("load"), theme::FAULT);
+                    note(ui, self.missing("load"), theme::FAULT);
                     return;
                 }
                 // A resistor bank draws what it draws, cannot be switched
                 // from here, and stops when you disconnect it. There is
                 // nothing on this card it would obey.
                 if manual {
-                    theme::note(
+                    note(
                         ui,
                         format!(
                             "{} cannot be driven from here: switch it by hand and watch \
@@ -1958,7 +1963,7 @@ impl App {
                 if running && now != before {
                     self.send(Command::TuneLoad(now));
                 }
-                theme::note(
+                note(
                     ui,
                     match self.discharge_mode {
                         LoadMode::Cc => "Constant current until the first cell reaches its floor.",
@@ -1972,13 +1977,13 @@ impl App {
                 let pending = self.pending_connect();
                 let busy = self.busy().filter(|_| !wanted);
                 if let Some(what) = &busy {
-                    theme::note(ui, format!("{what}: stop it to discharge."), theme::LEGEND);
+                    note(ui, format!("{what}: stop it to discharge."), theme::LEGEND);
                 }
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
                             !pending && busy.is_none(),
-                            egui::Button::new(theme::action("Discharge")),
+                            egui::Button::new(action("Discharge")),
                         )
                         .clicked()
                     {
@@ -2000,7 +2005,7 @@ impl App {
                     && u.plan_steps == 1
                     && u.step_label.starts_with("discharge")
                 {
-                    theme::note(ui, u.note.clone(), theme::READOUT);
+                    note(ui, u.note.clone(), theme::READOUT);
                 }
                 if let Some(ah) = last.as_ref().and_then(|u| u.measured_ah) {
                     ui.label(
@@ -2021,13 +2026,13 @@ impl App {
             .as_ref()
             .map(|u| u.running && u.plan_steps > 1)
             .unwrap_or(false);
-        theme::card(
+        card(
             ui,
             Some(if running { theme::OK } else { theme::ETCH }),
             |ui| {
-                ui.label(theme::legend("cycle plan"));
+                ui.label(legend("cycle plan"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    theme::lamp(ui, if running { "running" } else { "idle" }, running, false);
+                    lamp(ui, if running { "running" } else { "idle" }, running, false);
                 });
             },
             |ui| {
@@ -2049,14 +2054,14 @@ impl App {
                     } else {
                         self.missing(what)
                     };
-                    theme::note(ui, why, theme::FAULT);
+                    note(ui, why, theme::FAULT);
                     return;
                 }
                 field(ui, "rest min", &mut self.rest_min, 0.0..=600.0, 5.0, 0);
                 let mut repeat = self.repeat as f64;
                 field(ui, "cycles", &mut repeat, 1.0..=20.0, 1.0, 0);
                 self.repeat = repeat as usize;
-                theme::note(
+                note(
                     ui,
                     "Charge, rest, discharge counting Ah, rest.",
                     theme::LEGEND,
@@ -2064,12 +2069,12 @@ impl App {
                 ui.add_space(4.0);
                 let busy = self.busy().filter(|_| !running);
                 if let Some(what) = &busy {
-                    theme::note(ui, format!("{what}: stop it to run a test."), theme::LEGEND);
+                    note(ui, format!("{what}: stop it to run a test."), theme::LEGEND);
                 }
                 if ui
                     .add_enabled(
                         busy.is_none(),
-                        egui::Button::new(theme::action("Run capacity test")),
+                        egui::Button::new(action("Run capacity test")),
                     )
                     .clicked()
                 {
@@ -2092,7 +2097,7 @@ impl App {
                             .size(11.5)
                             .color(theme::READOUT),
                         );
-                        theme::note(ui, u.note.clone(), theme::LEGEND);
+                        note(ui, u.note.clone(), theme::LEGEND);
                     }
                     for r in u.results.iter().rev().take(6) {
                         ui.label(
@@ -2257,7 +2262,7 @@ fn elide(text: &str, max: usize) -> String {
 /// you ask for it.
 fn soc_stop(ui: &mut egui::Ui, label: &str, on: &mut bool, value: &mut f64) {
     ui.horizontal(|ui| {
-        if theme::toggle(ui, label, *on).clicked() {
+        if toggle(ui, label, *on).clicked() {
             *on = !*on;
         }
         if *on {
@@ -2300,7 +2305,7 @@ fn field(
                 .speed(step)
                 .fixed_decimals(decimals),
         );
-        ui.label(theme::legend(label));
+        ui.label(legend(label));
     });
 }
 
@@ -2345,7 +2350,7 @@ fn main() -> eframe::Result<()> {
         "cycler",
         options,
         Box::new(|cc| {
-            theme::apply(&cc.egui_ctx);
+            egui_bench::install(&cc.egui_ctx);
             Ok(Box::new(if demo { App::demo() } else { App::new(log) }))
         }),
     )

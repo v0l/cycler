@@ -1,4 +1,4 @@
-use crate::theme;
+use egui_bench::theme;
 use egui::{Align2, Color32, Pos2, Rect, Stroke, Ui, Vec2};
 
 /// One trace: a name for the key, a colour, and points already in the units
