@@ -297,7 +297,8 @@ fn apply(d: &mut Devices, want: Demand, have: Demand, pack_v: f64) -> Result<(),
         if want.charger_on
             && (want.charger_a != have.charger_a || want.charger_v != have.charger_v)
         {
-            let _ = c.set(want.charger_v, want.charger_a);
+            c.set(want.charger_v, want.charger_a)
+                .map_err(|e| format!("{e:#}"))?;
         }
         if want.charger_on != have.charger_on {
             let _ = if want.charger_on { c.start() } else { c.stop() };
