@@ -87,6 +87,9 @@ impl Tuning {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     NoCurrent,
+    /// The load's output went off without being told: its own cutoff, or a
+    /// hand on its panel.
+    LoadOff,
     SocTarget,
     CellFloor,
     PackFloor,
@@ -111,6 +114,7 @@ pub struct Controller {
     pub amp_hours: f64,
     baseline_ah: Option<f64>,
     integrated_ah: f64,
+    saw_load_on: bool,
     started: Option<Instant>,
     flowing_since: Option<Instant>,
     last: Option<Instant>,
@@ -127,6 +131,7 @@ impl Controller {
             amp_hours: 0.0,
             baseline_ah: None,
             integrated_ah: 0.0,
+            saw_load_on: false,
             started: None,
             flowing_since: None,
             last: None,
@@ -155,6 +160,7 @@ impl Controller {
         if let Some(l) = load {
             let base = *self.baseline_ah.get_or_insert(l.amp_hours);
             self.amp_hours = (l.amp_hours - base).max(0.0);
+            self.saw_load_on |= l.on;
         } else {
             if let Some(prev) = self.last {
                 let dt = now.saturating_duration_since(prev).as_secs_f64() / 3600.0;
@@ -182,8 +188,18 @@ impl Controller {
             .stop_on_alarm
             .then(|| s.blocking_alarm(&self.cfg.alarms_ignored))
             .flatten();
+        // The load was sinking and now says its output is off, so the
+        // discharge is already over: its own cutoff fired, or someone
+        // pressed the button. Waiting for the stall timer would blame the
+        // bench for it, and the pack rebounds above the floor meanwhile.
+        let quit = self.load_on
+            && self.saw_load_on
+            && !self.manual
+            && load.is_some_and(|l| !l.on);
         let stop = if alarm.is_some() {
             Some(Reason::PackAlarm)
+        } else if quit {
+            Some(Reason::LoadOff)
         } else if stalled {
             Some(Reason::NoCurrent)
         } else if self.cfg.stop_at_soc.is_some_and(|t| s.soc <= t) {
@@ -216,6 +232,9 @@ impl Controller {
                     // supply of its own.
                     (None, Reason::NoCurrent) => {
                         "NoCurrent (leads, rating, or the load's own supply)".into()
+                    }
+                    (None, Reason::LoadOff) => {
+                        "LoadOff (its own cutoff, or switched off at the panel)".into()
                     }
                     (None, _) => format!("{r:?}"),
                 };
@@ -422,6 +441,41 @@ mod tests {
             Some(Reason::NoCurrent)
         );
         assert!(!c.load_on);
+    }
+
+    #[test]
+    fn a_load_that_cuts_off_on_its_own_ends_the_discharge() {
+        let mut c = Controller::new(cfg());
+        let t = Instant::now();
+        let load = |on: bool| {
+            Some(LoadState {
+                on,
+                amp_hours: 1.5,
+                ..Default::default()
+            })
+        };
+        // Off on the first poll is the load not started yet, not a cutoff.
+        assert_eq!(c.step(&snap(&[3200]), load(false), t), None);
+        assert!(c.load_on);
+        assert_eq!(c.step(&snap(&[3200]), load(true), t), None);
+        // Its own cutoff fires and the pack rebounds above the floor.
+        assert_eq!(
+            c.step(&snap(&[3200]), load(false), t),
+            Some(Reason::LoadOff)
+        );
+        assert!(!c.load_on);
+        assert!(c.note.contains("LoadOff"), "{}", c.note);
+    }
+
+    #[test]
+    fn a_manual_load_never_reports_itself_on_and_keeps_running() {
+        let mut c = Controller::new(cfg());
+        c.manual = true;
+        let t = Instant::now();
+        let off = Some(LoadState::default());
+        assert_eq!(c.step(&snap(&[3200]), off, t), None);
+        assert_eq!(c.step(&snap(&[3200]), off, t), None);
+        assert!(c.load_on);
     }
 
     #[test]
