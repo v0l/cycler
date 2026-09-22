@@ -140,6 +140,7 @@ jobs:
           msi_version="$(printf '%s' "${version#v}" | sed -E 's/[-+].*$//')"
           wix build \
             -arch x64 \
+            -pdbtype none \
             -d "Version=${msi_version}" \
             -d "BinDir=target/${{ matrix.target }}/release" \
             -o "dist/cycler-${version}-${{ matrix.target }}.msi" \
