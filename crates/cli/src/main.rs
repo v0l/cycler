@@ -135,8 +135,6 @@ enum Cmd {
         charger: String,
         #[arg(long, default_value = "dl24:")]
         load: String,
-        #[arg(long, value_enum, default_value_t = charge::Mode::Standard)]
-        charge_mode: charge::Mode,
         #[arg(long, default_value_t = 3.0)]
         max_current: f64,
         #[arg(long, default_value_t = 51.5)]
@@ -457,7 +455,6 @@ fn main() -> Result<()> {
             pack: pack_spec,
             charger: charger_spec,
             load: load_spec,
-            charge_mode,
             max_current,
             cv,
             ceiling_mv,
@@ -488,7 +485,6 @@ fn main() -> Result<()> {
             );
             let plan = cycler_core::cycle::Plan::capacity(
                 charge::Config {
-                    mode: charge_mode,
                     v_absorb: cv,
                     v_float: cv - 0.5,
                     v_recharge: cv - 2.0,

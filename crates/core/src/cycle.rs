@@ -68,12 +68,21 @@ impl Plan {
 
     /// The capacity test: fill, let it settle, empty it counting amp-hours,
     /// settle again. Repeat to see whether capacity moves between cycles.
+    ///
+    /// The charge always runs the standard stages. A bulk-only charge leaves
+    /// the pack short of full and a balance hold adds hours of held voltage
+    /// that no amp-hour figure counts, so either one makes the cycles it is
+    /// measuring incomparable.
     pub fn capacity(
         charge: charge::Config,
         discharge: discharge::Config,
         rest: Duration,
         repeat: usize,
     ) -> Self {
+        let charge = charge::Config {
+            mode: charge::Mode::Standard,
+            ..charge
+        };
         Self {
             steps: vec![
                 Step::Charge(charge),
@@ -464,20 +473,23 @@ mod tests {
     }
 
     fn plan() -> Plan {
-        Plan::capacity(
-            charge::Config {
-                mode: charge::Mode::BulkOnly,
-                cell_ceiling_mv: 3500,
-                ..Default::default()
-            },
-            discharge::Config {
-                cell_floor_mv: 3000,
-                pack_floor_v: 1.0,
-                ..Default::default()
-            },
-            Duration::from_secs(60),
-            2,
-        )
+        Plan {
+            steps: vec![
+                Step::Charge(charge::Config {
+                    mode: charge::Mode::BulkOnly,
+                    cell_ceiling_mv: 3500,
+                    ..Default::default()
+                }),
+                Step::Rest(Duration::from_secs(60)),
+                Step::Discharge(discharge::Config {
+                    cell_floor_mv: 3000,
+                    pack_floor_v: 1.0,
+                    ..Default::default()
+                }),
+                Step::Rest(Duration::from_secs(60)),
+            ],
+            repeat: 2,
+        }
     }
 
     #[test]
@@ -530,6 +542,23 @@ mod tests {
         assert!(r.done());
         assert_eq!(r.results.len(), 2);
         assert_eq!(r.results[1].cycle, 2);
+    }
+
+    #[test]
+    fn a_capacity_test_charges_the_standard_way() {
+        let p = Plan::capacity(
+            charge::Config {
+                mode: charge::Mode::BulkOnly,
+                ..Default::default()
+            },
+            discharge::Config::default(),
+            Duration::from_secs(60),
+            1,
+        );
+        let Step::Charge(c) = &p.steps[0] else {
+            panic!("first step is the charge");
+        };
+        assert_eq!(c.mode, charge::Mode::Standard);
     }
 
     #[test]
