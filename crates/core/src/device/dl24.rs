@@ -192,7 +192,7 @@ impl Dl24 {
             .wait()
             .context("claiming DL24 interface 0")?;
 
-        device
+        interface
             .control_out(
                 ControlOut {
                     control_type: ControlType::Class,

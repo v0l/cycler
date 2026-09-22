@@ -2316,25 +2316,18 @@ static SHUTDOWN: std::sync::Mutex<Option<std::sync::mpsc::Sender<Command>>> =
 
 fn stop_hardware_on_signal() {
     cycler_core::interrupt::install();
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    let mut signals = match signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP]) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("signal handler: {e}");
-            return;
-        }
-    };
     std::thread::spawn(move || {
-        if signals.forever().next().is_some() {
-            let tx = SHUTDOWN.lock().ok().and_then(|g| g.clone());
-            if let Some(tx) = tx {
-                let _ = tx.send(Command::Quit);
-                // The worker stops the hardware and exits; give it long enough
-                // for a serial round trip before killing the process.
-                std::thread::sleep(Duration::from_millis(1500));
-            }
-            std::process::exit(0);
+        while !cycler_core::interrupt::requested() {
+            std::thread::sleep(Duration::from_millis(100));
         }
+        let tx = SHUTDOWN.lock().ok().and_then(|g| g.clone());
+        if let Some(tx) = tx {
+            let _ = tx.send(Command::Quit);
+            // The worker stops the hardware and exits; give it long enough
+            // for a serial round trip before killing the process.
+            std::thread::sleep(Duration::from_millis(1500));
+        }
+        std::process::exit(0);
     });
 }
 

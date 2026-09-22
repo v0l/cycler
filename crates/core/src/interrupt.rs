@@ -10,16 +10,20 @@ use std::sync::Arc;
 
 static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
-/// Catch SIGINT, SIGTERM and SIGHUP. Safe to call more than once.
+/// Catch SIGINT and SIGTERM, plus SIGHUP where the platform has one.
 pub fn install() {
     let flag = STOP.get_or_init(|| Arc::new(AtomicBool::new(false)));
     static INSTALLED: OnceLock<()> = OnceLock::new();
+    #[cfg(unix)]
+    const SIGNALS: &[i32] = &[
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ];
+    #[cfg(not(unix))]
+    const SIGNALS: &[i32] = &[signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
     INSTALLED.get_or_init(|| {
-        for sig in [
-            signal_hook::consts::SIGINT,
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGHUP,
-        ] {
+        for &sig in SIGNALS {
             if let Err(e) = signal_hook::flag::register(sig, flag.clone()) {
                 eprintln!("signal {sig}: {e}");
             }
