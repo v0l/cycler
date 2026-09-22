@@ -1171,7 +1171,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cycler-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "cycler-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "battery_control",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "cycler-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cycler-core",
