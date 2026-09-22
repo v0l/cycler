@@ -4,10 +4,29 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description.workspace = true
 
 [[bin]]
 name = "cycler"
 path = "src/main.rs"
+
+[package.metadata.deb]
+name = "cycler"
+maintainer = "v0l <kieran@harkin.me>"
+copyright = "v0l"
+license-file = ["../../LICENSE", "0"]
+section = "electronics"
+priority = "optional"
+extended-description = """\
+Cycler runs charge, discharge and capacity tests against battery cells \
+over a supported BMS or charger link. Ships the cycler command line tool \
+and the cycler-ui desktop application."""
+assets = [
+    ["target/release/cycler", "usr/bin/", "755"],
+    ["target/release/cycler-ui", "usr/bin/", "755"],
+    ["../../packaging/linux/cycler.desktop", "usr/share/applications/", "644"],
+    ["../../README.md", "usr/share/doc/cycler/README.md", "644"],
+]
 
 [dependencies]
 cycler-core.workspace = true

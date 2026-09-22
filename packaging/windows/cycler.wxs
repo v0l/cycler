@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Cycler"
+      Manufacturer="v0l"
+      Version="$(var.Version)"
+      UpgradeCode="d665ac2a-5e06-460e-91b2-abb5215b2bca"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Cycler is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/v0l/cycler" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Cycler">
+        <Component Id="CyclerCli" Guid="4c9136d3-8bdb-4a82-b2a7-003a6fb277e3">
+          <File Id="CyclerExe" Source="$(var.BinDir)\cycler.exe" KeyPath="yes" />
+          <Environment Id="CyclerPath" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" System="yes" Permanent="no" />
+        </Component>
+        <Component Id="CyclerUi" Guid="2ccc262a-85b4-4c66-98be-9d93815ccc25">
+          <File Id="CyclerUiExe" Source="$(var.BinDir)\cycler-ui.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="CyclerDocs" Guid="6f7e0bc7-afee-47c4-8e60-7dfc73f218c6">
+          <File Id="ReadmeMd" Source="README.md" KeyPath="yes" />
+          <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="CyclerShortcut" Guid="a4f0f3f0-2d8a-4a17-9a1a-6d0b6f5d9c11">
+        <Shortcut Id="CyclerUiShortcut" Name="Cycler" Target="[#CyclerUiExe]" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKLM" Key="Software\v0l\Cycler" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Cycler" Level="1">
+      <ComponentRef Id="CyclerCli" />
+      <ComponentRef Id="CyclerUi" />
+      <ComponentRef Id="CyclerDocs" />
+      <ComponentRef Id="CyclerShortcut" />
+    </Feature>
+  </Package>
+</Wix>

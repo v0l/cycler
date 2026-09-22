@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cycler
+GenericName=Battery Cycle Tester
+Comment=Charge, discharge and capacity measurement for battery cells
+Exec=cycler-ui
+Terminal=false
+Categories=Utility;Science;Electronics;
+Keywords=battery;bms;charger;capacity;
