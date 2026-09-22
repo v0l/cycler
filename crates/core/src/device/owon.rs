@@ -14,9 +14,35 @@ pub struct Info {
     pub regulation: Regulation,
 }
 
+/// Volts, amps and watts each model can actually deliver. `VOLT:LIM` and
+/// `CURR:LIM` are the OVP and OCP trip registers, not the rating, so they say
+/// nothing about the supply's capability and everything about what the last
+/// run left behind.
+const MODELS: &[(&str, f64, f64, f64)] = &[
+    ("SPE3051", 30.0, 5.0, 150.0),
+    ("SPE3102", 30.0, 10.0, 200.0),
+    ("SPE6102", 60.0, 10.0, 200.0),
+    ("SPE6053", 60.0, 5.0, 300.0),
+    ("SPE3103", 30.0, 10.0, 300.0),
+    ("SPE6103", 60.0, 10.0, 300.0),
+];
+
+fn rating(idn: &str) -> Option<Limits> {
+    let idn = idn.to_ascii_uppercase();
+    MODELS
+        .iter()
+        .find(|(model, ..)| idn.contains(model))
+        .map(|&(_, max_volts, max_amps, max_watts)| Limits {
+            max_volts,
+            max_amps,
+            max_watts,
+        })
+}
+
 pub struct OwonSpe {
     port: Box<dyn serialport::SerialPort>,
     idn: String,
+    rating: Limits,
     limits: Limits,
 }
 
@@ -31,26 +57,25 @@ impl OwonSpe {
             .timeout(Duration::from_millis(400))
             .open()
             .with_context(|| format!("opening PSU at {path}"))?;
+        let unknown = Limits {
+            max_volts: 30.0,
+            max_amps: 5.0,
+            max_watts: 150.0,
+        };
         let mut psu = Self {
             port,
             idn: String::new(),
-            limits: Limits {
-                max_volts: 60.0,
-                max_amps: 10.0,
-                max_watts: 600.0,
-            },
+            rating: unknown.clone(),
+            limits: unknown,
         };
         psu.idn = psu.ask("*IDN?")?;
         if !psu.idn.contains("SPE") {
             bail!("not an OWON SPE supply: {:?}", psu.idn);
         }
-        if let (Ok(v), Ok(a)) = (
-            psu.ask("VOLT:LIM?").and_then(|s| Ok(s.parse::<f64>()?)),
-            psu.ask("CURR:LIM?").and_then(|s| Ok(s.parse::<f64>()?)),
-        ) {
-            psu.limits.max_volts = v;
-            psu.limits.max_amps = a;
+        if let Some(r) = rating(&psu.idn) {
+            psu.rating = r;
         }
+        psu.limits = psu.rating.clone();
         Ok(psu)
     }
 
@@ -118,13 +143,22 @@ impl OwonSpe {
         })
     }
 
-    /// Clamp the supply's own hardware limits so a crashed controller cannot
-    /// command more than the pack tolerates.
+    /// Write the supply's own OVP and OCP trip points so a crashed controller
+    /// cannot command more than the pack tolerates, and read them back: a
+    /// value the supply would not take is a trip waiting to happen.
     pub fn arm_limits(&mut self, max_volts: f64, max_amps: f64) -> Result<()> {
         self.send(&format!("VOLT:LIM {max_volts:.3}"))?;
         self.send(&format!("CURR:LIM {max_amps:.3}"))?;
-        self.limits.max_volts = max_volts;
-        self.limits.max_amps = max_amps;
+        let got_v: f64 = self.ask("VOLT:LIM?")?.parse().unwrap_or(0.0);
+        let got_a: f64 = self.ask("CURR:LIM?")?.parse().unwrap_or(0.0);
+        if (got_v - max_volts).abs() > 0.05 || (got_a - max_amps).abs() > 0.05 {
+            bail!(
+                "supply kept its protection at {got_v:.2} V {got_a:.3} A \
+                 instead of {max_volts:.2} V {max_amps:.3} A"
+            );
+        }
+        self.limits.max_volts = got_v;
+        self.limits.max_amps = got_a;
         Ok(())
     }
 }
@@ -162,14 +196,16 @@ impl Charger for OwonSpe {
         Ok(Some(self.info()?.regulation))
     }
 
-    /// Never widen what the supply was already set to allow: the panel
-    /// setting is someone's decision about this bench, and a config file
-    /// does not outrank it.
+    /// On this supply the limits are trip points: reaching one cuts the
+    /// output mid-charge. So they are written from what this charge asks for,
+    /// a little above it, and clamped only by what the model can deliver.
+    /// Whatever the last run left on the panel does not decide this one.
     fn arm(&mut self, max_volts: f64, max_amps: f64) -> Result<bool> {
-        self.arm_limits(
-            max_volts.min(self.limits.max_volts),
-            max_amps.min(self.limits.max_amps),
-        )?;
+        let volts = max_volts.min(self.rating.max_volts);
+        let amps = max_amps
+            .min(self.rating.max_amps)
+            .min(self.rating.max_watts / volts.max(1.0));
+        self.arm_limits(volts, amps)?;
         Ok(true)
     }
 
@@ -222,6 +258,21 @@ mod tests {
         let (_, a, _, r) = parse("51.500,2.730,140.595,OFF,OFF,OFF,2");
         assert_eq!(a, 2.73);
         assert_eq!(r, Regulation::Cc);
+    }
+
+    #[test]
+    fn the_rating_comes_from_the_model_not_the_trip_points() {
+        let r = rating("OWON,SPE6103,25521912,FV:V5.5.0").unwrap();
+        assert_eq!((r.max_volts, r.max_amps, r.max_watts), (60.0, 10.0, 300.0));
+        assert!(rating("OWON,SPE9999,1,FV:V1").is_none());
+    }
+
+    #[test]
+    fn the_armed_current_stays_inside_the_power_envelope() {
+        let r = rating("SPE6103").unwrap();
+        let volts = 52.25_f64.min(r.max_volts);
+        let amps = 6.25_f64.min(r.max_amps).min(r.max_watts / volts);
+        assert!((amps - 5.741).abs() < 0.01);
     }
 
     #[test]
