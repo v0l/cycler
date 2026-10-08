@@ -193,7 +193,7 @@ enum Cmd {
         /// Command to send. Queries (ending in ?) print the reply.
         #[arg(default_value = "*IDN?")]
         command: String,
-        #[arg(long, default_value_t = 9600)]
+        #[arg(long, default_value_t = 115_200)]
         baud: u32,
         /// Try a battery of likely queries and report which ones answer.
         #[arg(long)]

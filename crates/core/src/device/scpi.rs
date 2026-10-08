@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 
 pub struct Scpi {
     port: Box<dyn serialport::SerialPort>,
+    last_write: Option<Instant>,
 }
+
+const WRITE_GAP: Duration = Duration::from_millis(50);
 
 /// Queries worth trying on an unknown electronic load. Harmless: every one is
 /// a read, and an instrument ignores what it does not know.
@@ -42,12 +45,19 @@ impl Scpi {
             .timeout(Duration::from_millis(400))
             .open()
             .with_context(|| format!("opening {path} at {baud}"))?;
-        Ok(Self { port })
+        Ok(Self {
+            port,
+            last_write: None,
+        })
     }
 
     pub fn send(&mut self, cmd: &str) -> Result<()> {
+        if let Some(at) = self.last_write {
+            std::thread::sleep(WRITE_GAP.saturating_sub(at.elapsed()));
+        }
         self.port.write_all(format!("{cmd}\r\n").as_bytes())?;
         self.port.flush()?;
+        self.last_write = Some(Instant::now());
         Ok(())
     }
 

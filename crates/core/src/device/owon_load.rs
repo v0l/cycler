@@ -9,12 +9,38 @@
 use super::scpi::Scpi;
 use super::{Device, Discharger, Limits, LoadMode, LoadState, Sample};
 use anyhow::{Context, Result, bail};
+use std::time::Instant;
 
 pub struct OwonLoad {
     io: Scpi,
     idn: String,
     limits: Limits,
     battery_mode: bool,
+    tally: Tally,
+}
+
+#[derive(Debug, Default)]
+struct Tally {
+    amp_hours: f64,
+    watt_hours: f64,
+    runtime_s: f64,
+    last_on: Option<Instant>,
+}
+
+impl Tally {
+    fn add(&mut self, now: Instant, on: bool, amps: f64, watts: f64) {
+        if let Some(prev) = self.last_on.filter(|_| on) {
+            let secs = now.saturating_duration_since(prev).as_secs_f64();
+            self.amp_hours += amps.abs() * secs / 3600.0;
+            self.watt_hours += watts.abs() * secs / 3600.0;
+            self.runtime_s += secs;
+        }
+        self.last_on = on.then_some(now);
+    }
+}
+
+fn input_is_on(reply: &str) -> bool {
+    matches!(reply.trim().to_ascii_uppercase().as_str(), "1" | "ON")
 }
 
 fn func(mode: LoadMode) -> &'static str {
@@ -57,13 +83,14 @@ fn limits_from_model(idn: &str) -> Limits {
 
 impl OwonLoad {
     pub fn open(path: &str) -> Result<Self> {
-        // The panel default is 9600; anything else is set in the system menu.
-        let baud: u32 = std::env::var("OWON_LOAD_BAUD")
+        let bauds: Vec<u32> = match std::env::var("OWON_LOAD_BAUD")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(9600);
-        let mut io = Scpi::open(path, baud).context("opening OWON load")?;
-        let idn = io.identify()?;
+        {
+            Some(b) => vec![b],
+            None => vec![115_200, 9600, 19_200, 38_400, 57_600],
+        };
+        let (mut io, idn) = Self::find_baud(path, &bauds)?;
         if !idn.to_ascii_uppercase().contains("OEL") {
             bail!("not an OWON OEL load: {idn:?}");
         }
@@ -75,7 +102,21 @@ impl OwonLoad {
             idn,
             limits,
             battery_mode: false,
+            tally: Tally::default(),
         })
+    }
+
+    fn find_baud(path: &str, bauds: &[u32]) -> Result<(Scpi, String)> {
+        let mut last = None;
+        for &baud in bauds {
+            let mut io = Scpi::open(path, baud).context("opening OWON load")?;
+            match io.identify() {
+                Ok(idn) => return Ok((io, idn)),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("no baud rates to try")))
+            .with_context(|| format!("no SCPI reply on {path} at {bauds:?}"))
     }
 
     fn num(&mut self, q: &str) -> Result<f64> {
@@ -127,7 +168,7 @@ impl Device for OwonLoad {
     }
 
     fn output_on(&mut self) -> Result<Option<bool>> {
-        Ok(Some(self.io.ask("INP?")?.trim().starts_with('1')))
+        Ok(Some(input_is_on(&self.io.ask("INP?")?)))
     }
 }
 
@@ -152,7 +193,10 @@ impl Discharger for OwonLoad {
 
     fn set_current(&mut self, amps: f64) -> Result<()> {
         if amps > self.limits.max_amps {
-            bail!("{amps:.2} A is over this load's {:.0} A rating", self.limits.max_amps);
+            bail!(
+                "{amps:.2} A is over this load's {:.0} A rating",
+                self.limits.max_amps
+            );
         }
         self.set_mode(LoadMode::Cc, amps)
     }
@@ -169,10 +213,10 @@ impl Discharger for OwonLoad {
     }
 
     fn amp_hours(&mut self) -> Result<Option<f64>> {
-        if !self.battery_mode {
-            return Ok(None);
+        if self.battery_mode {
+            return Ok(self.num("BAT:CAPA?").ok());
         }
-        Ok(self.num("BAT:CAPA?").ok())
+        Ok(Some(self.tally.amp_hours))
     }
 
     fn state(&mut self) -> Result<LoadState> {
@@ -180,14 +224,19 @@ impl Discharger for OwonLoad {
         let amps = self.num("MEAS:CURR?")?;
         let watts = self.num("MEAS:POW?").unwrap_or(volts * amps);
         let on = self.output_on()?.unwrap_or(false);
+        self.tally.add(Instant::now(), on, amps, watts);
         let (amp_hours, watt_hours, runtime_s) = if self.battery_mode {
             (
-                self.num("BAT:CAPA?").unwrap_or(0.0),
-                self.num("BAT:ENERGY?").unwrap_or(0.0),
-                self.num("BAT:TIME?").unwrap_or(0.0),
+                self.num("BAT:CAPA?").unwrap_or(self.tally.amp_hours),
+                self.num("BAT:ENERGY?").unwrap_or(self.tally.watt_hours),
+                self.num("BAT:TIME?").unwrap_or(self.tally.runtime_s),
             )
         } else {
-            (0.0, 0.0, 0.0)
+            (
+                self.tally.amp_hours,
+                self.tally.watt_hours,
+                self.tally.runtime_s,
+            )
         };
         Ok(LoadState {
             setpoint: self.num("CURR?").unwrap_or(0.0),
@@ -223,6 +272,29 @@ mod tests {
         assert_eq!(l.max_volts, 150.0);
         assert_eq!(l.max_amps, 15.0);
         assert_eq!(l.max_watts, 150.0);
+    }
+
+    #[test]
+    fn input_state_reads_words_and_digits() {
+        assert!(input_is_on("ON"));
+        assert!(input_is_on("1\n"));
+        assert!(!input_is_on("OFF"));
+        assert!(!input_is_on("0"));
+        assert!(!input_is_on(""));
+    }
+
+    #[test]
+    fn tally_counts_only_while_on() {
+        let t0 = Instant::now();
+        let mut t = Tally::default();
+        t.add(t0, true, 2.0, 30.0);
+        t.add(t0 + std::time::Duration::from_secs(1800), true, 2.0, 30.0);
+        t.add(t0 + std::time::Duration::from_secs(3600), false, 0.0, 0.0);
+        t.add(t0 + std::time::Duration::from_secs(5400), true, 2.0, 30.0);
+        t.add(t0 + std::time::Duration::from_secs(5401), false, 0.0, 0.0);
+        assert!((t.amp_hours - 1.0).abs() < 1e-9);
+        assert!((t.watt_hours - 15.0).abs() < 1e-9);
+        assert!((t.runtime_s - 1800.0).abs() < 1e-9);
     }
 
     #[test]
