@@ -220,8 +220,18 @@ impl App {
             *g = Some(session.tx.clone());
         }
         let _ = session.tx.send(Command::SetProfile(self.profile));
+        let _ = session
+            .tx
+            .send(Command::SetCapacity(self.remembered.learned_ah));
         self.active = self.selected_specs();
         self.session = Some(session);
+    }
+
+    /// Drop the measured capacity and go back to reading SOC off the voltage.
+    fn forget_capacity(&mut self) {
+        self.remembered.learned_ah = None;
+        self.remembered.save();
+        self.send(Command::SetCapacity(None));
     }
 
     /// What the dropdowns currently say, which is not the same as what the
@@ -521,6 +531,15 @@ impl App {
                 self.ended = Some(v);
             }
             self.error = u.error.clone();
+            if let Some(ah) = u.learned_ah.filter(|ah| *ah > 0.0)
+                && !self
+                    .remembered
+                    .learned_ah
+                    .is_some_and(|was| (was - ah).abs() < 0.05)
+            {
+                self.remembered.learned_ah = Some(ah);
+                self.remembered.save();
+            }
             self.last = Some(u);
             if self.last.as_ref().is_some_and(|u| u.running) {
                 self.running_stage = Some(self.stage_view());
@@ -623,53 +642,64 @@ impl eframe::App for App {
             .resizable(false)
             .frame(egui::Frame::NONE.fill(theme::CHASSIS).inner_margin(8))
             .show(root, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
-                self.devices_card(ui);
-                self.profile_card(ui);
-                self.controls(ui);
-                self.discharge_card(ui);
-                self.plan_card(ui);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        self.devices_card(ui);
+                        self.profile_card(ui);
+                        self.controls(ui);
+                        self.discharge_card(ui);
+                        self.plan_card(ui);
+                    });
             });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::CHASSIS).inner_margin(8))
             .show(root, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-                self.stage_card(ui);
-                self.battery_card(ui);
-                ui.horizontal_top(|ui| {
-                    let w = ((ui.available_width() - 8.0) / 2.0).max(0.0);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(w, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.charger_card(ui),
-                    );
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width().max(0.0), 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.load_card(ui),
-                    );
-                });
-                // Whatever is left over is split between the two views that
-                // reward the space: the comb of cells now, and the traces
-                // that got them there.
-                // Split what is left rather than letting each card claim a
-                // minimum: two minimums in a short window overflow the panel
-                // and the chart falls off the bottom of the screen.
-                // From the cursor to the bottom of the window. The root Ui
-                // hands out a stale height once the window has been resized,
-                // so the screen is the only thing worth measuring against.
-                let spare = (ui.ctx().content_rect().bottom() - 8.0 - ui.cursor().top()).max(80.0);
-                let chart_h = if self.has_cells() {
-                    let usable = (spare - 8.0 - 2.0 * CARD_CHROME).max(80.0);
-                    let comb_h = (usable * 0.44)
-                        .clamp(60.0, COMB_MIN_H.max(300.0_f32.min(usable - CHART_MIN_H)));
-                    self.cells_card(ui, comb_h);
-                    (usable - comb_h).max(90.0)
-                } else {
-                    (spare - CARD_CHROME).max(CHART_MIN_H)
-                };
-                self.history_card(ui, chart_h);
+                let budget = ui.available_height();
+                let top = ui.cursor().top();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                        self.stage_card(ui);
+                        self.battery_card(ui);
+                        ui.horizontal_top(|ui| {
+                            let w = ((ui.available_width() - 8.0) / 2.0).max(0.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(w, 0.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| self.charger_card(ui),
+                            );
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width().max(0.0), 0.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| self.load_card(ui),
+                            );
+                        });
+                        // Whatever is left over is split between the two views that
+                        // reward the space: the comb of cells now, and the traces
+                        // that got them there.
+                        // Split what is left rather than letting each card claim a
+                        // minimum: two minimums in a short window overflow the panel
+                        // and the chart falls off the bottom of the screen.
+                        // The cursor sits in the scroll content's own coordinates,
+                        // which is what has to be measured against the budget: the
+                        // root Ui is in screen coordinates, so subtracting one from
+                        // the other would be two different frames entirely.
+                        let spare = (budget - (ui.cursor().top() - top)).max(80.0);
+                        let chart_h = if self.has_cells() {
+                            let usable = (spare - 8.0 - 2.0 * CARD_CHROME).max(80.0);
+                            let comb_h = (usable * 0.44)
+                                .clamp(60.0, COMB_MIN_H.max(300.0_f32.min(usable - CHART_MIN_H)));
+                            self.cells_card(ui, comb_h);
+                            (usable - comb_h).max(90.0)
+                        } else {
+                            (spare - CARD_CHROME).max(CHART_MIN_H)
+                        };
+                        self.history_card(ui, chart_h);
+                    });
             });
     }
 }
@@ -730,6 +760,11 @@ impl App {
             .as_ref()
             .and_then(|u| u.measured_ah)
             .unwrap_or(0.0);
+        let learned = self
+            .last
+            .as_ref()
+            .and_then(|u| u.learned_ah)
+            .filter(|ah| *ah > 0.0);
         card(
             ui,
             rail,
@@ -763,19 +798,58 @@ impl App {
                                 format!("{:+.2} W", s.pack_v * s.current_a),
                                 theme::TRACE,
                             ),
-                            ("soc est", format!("{}%", s.soc), theme::READOUT),
+                            (
+                                if s.soc_estimated { "soc est" } else { "soc" },
+                                format!("{}%", s.soc),
+                                if s.soc_estimated {
+                                    theme::READOUT
+                                } else {
+                                    theme::VALUE
+                                },
+                            ),
+                            (
+                                "measured",
+                                match learned {
+                                    Some(ah) => format!("{ah:.1} Ah"),
+                                    None => "-".into(),
+                                },
+                                if learned.is_some() {
+                                    theme::VALUE
+                                } else {
+                                    theme::LEGEND
+                                },
+                            ),
                         ],
                     );
                     note(
                         ui,
-                        format!(
-                            "No BMS: read by the {}. SOC is estimated from {} voltage and \
-                             is only honest at rest; limits are pack voltage only.",
-                            source,
-                            chem
-                        ),
+                        match (!s.soc_estimated, learned) {
+                            (true, Some(ah)) => format!(
+                                "No BMS: read by the {source}. SOC is counted from current \
+                                 against the {ah:.1} Ah this pack measured, and a full charge or \
+                                 a full discharge places it again."
+                            ),
+                            (true, None) => format!(
+                                "No BMS: read by the {source}. SOC is counted from current, \
+                                 but no capacity is known yet: one capacity test measures it."
+                            ),
+                            (false, _) => format!(
+                                "No BMS: read by the {source}. SOC is estimated from {chem} \
+                                 voltage and is only honest at rest; a capacity test counts it \
+                                 instead."
+                            ),
+                        },
                         theme::LEGEND,
                     );
+                    let mut forget = false;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        if learned.is_some() && ui.button(action("Forget capacity")).clicked() {
+                            forget = true;
+                        }
+                    });
+                    if forget {
+                        self.forget_capacity();
+                    }
                 }
                 Some(s) => {
                     ui.horizontal(|ui| {
@@ -1990,11 +2064,7 @@ impl App {
                         self.send(Command::Start(Plan::discharge(self.discharge_config())));
                     }
                     if ui
-                        .button(
-                            RichText::new("Stop")
-                                .font(theme::legend_font(theme::VALUE_SIZE + 0.5))
-                                .color(theme::FAULT),
-                        )
+                        .button(RichText::new("Stop").font(theme::legend_font(theme::VALUE_SIZE + 0.5)).color(theme::FAULT))
                         .clicked()
                     {
                         self.send(Command::Stop);
@@ -2342,7 +2412,7 @@ fn main() -> eframe::Result<()> {
     stop_hardware_on_signal();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1400.0, 900.0])
+            .with_inner_size([1000.0, 620.0])
             .with_min_inner_size([980.0, 620.0]),
         ..Default::default()
     };

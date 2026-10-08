@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 pub enum Command {
     /// What the battery is, for a pack that cannot say so itself.
     SetProfile(cycler_core::chemistry::PackProfile),
+    /// Capacity the last cycle test measured, for a pack that cannot report
+    /// one itself. `None` forgets it and puts the panel back to guessing from
+    /// voltage.
+    SetCapacity(Option<f64>),
     Start(Plan),
     /// Change the currents and clocks of a charge that is already running.
     Tune(cycler_core::charge::Tuning),
@@ -39,6 +43,9 @@ pub struct Update {
     pub charge_stage: Option<(cycler_core::charge::Mode, cycler_core::charge::Phase)>,
     pub results: Vec<StepResult>,
     pub measured_ah: Option<f64>,
+    /// Capacity the pack is being tracked against, once a cycle has measured
+    /// one.
+    pub learned_ah: Option<f64>,
     pub error: Option<String>,
     pub pack_name: String,
     pub charger_name: String,
@@ -145,6 +152,9 @@ pub fn demo_update(at: Instant, minute: f64) -> Update {
         charge_stage: Some((Mode::Standard, Phase::Absorb)),
         results: Vec::new(),
         measured_ah: Some(46.2),
+        // A BMS pack reports its own state of charge, so nothing is being
+        // counted against a measured capacity here.
+        learned_ah: None,
         error: None,
         pack_name: "US2000C K21C022C321C1526".into(),
         charger_name: "OWON,SPE6103,25521912,FV:V5.5.0".into(),
@@ -430,6 +440,14 @@ fn run(
                         pack.set_profile(p);
                     }
                 }
+                Ok(Command::SetCapacity(ah)) => {
+                    if let Some(g) = dev.pack.as_mut().and_then(|p| p.gauge()) {
+                        match ah {
+                            Some(ah) => g.set_capacity(ah),
+                            None => g.forget(),
+                        }
+                    }
+                }
                 Ok(Command::Tune(t)) => {
                     if let Some(r) = runner.as_mut() {
                         r.retune_charge(&t);
@@ -478,6 +496,11 @@ fn run(
             charge_stage: None,
             results: Vec::new(),
             measured_ah: None,
+            learned_ah: dev
+                .pack
+                .as_mut()
+                .and_then(|p| p.gauge())
+                .and_then(|g| g.capacity_ah()),
             error: refused
                 .take()
                 .or_else(|| (!dev.errors.is_empty()).then(|| dev.errors.join("; "))),
@@ -586,6 +609,11 @@ fn run(
                 }
                 if let Some(r) = runner.as_mut() {
                     let want = r.step_sample(&s, load_state, Instant::now());
+                    for a in r.take_anchors() {
+                        if let Some(g) = dev.pack.as_mut().and_then(|p| p.gauge()) {
+                            g.anchor(a);
+                        }
+                    }
                     if let Err(e) = apply(&mut dev, want, demand, s.pack_v) {
                         stop_all(&mut dev);
                         demand = Demand::default();

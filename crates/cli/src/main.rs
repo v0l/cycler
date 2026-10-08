@@ -264,9 +264,10 @@ fn run_plan(
                 println!("--- cycle {} step {}", runner.cycle() + 1, last_label);
             }
             println!(
-                "{:.3} V {:+.2} A soc {:>3}% cells {}-{} spread {:>3} mV {:.1} C | {}",
+                "{:.3} V {:+.2} A soc {}{:>3}% cells {}-{} spread {:>3} mV {:.1} C | {}",
                 s.pack_v,
                 s.current_a,
+                if s.soc_estimated { "~" } else { "" },
                 s.soc,
                 s.low_mv(),
                 s.high_mv(),
@@ -402,9 +403,10 @@ fn main() -> Result<()> {
                     eprintln!("log write: {e:#}");
                 }
                 println!(
-                    "{:.3} V {:+.2} A soc {:>3}% cells {}-{} spread {:>3} mV (hi c{}) {:.1} C | set {:.2} A {} [{}]",
+                    "{:.3} V {:+.2} A soc {}{:>3}% cells {}-{} spread {:>3} mV (hi c{}) {:.1} C | set {:.2} A {} [{}]",
                     s.pack_v,
                     s.current_a,
+                    if s.soc_estimated { "~" } else { "" },
                     s.soc,
                     s.low_mv(),
                     s.high_mv(),

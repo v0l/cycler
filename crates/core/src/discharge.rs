@@ -101,6 +101,12 @@ pub enum Reason {
     TimeLimit,
 }
 
+impl Reason {
+    pub fn empty(self) -> bool {
+        matches!(self, Reason::LoadOff | Reason::CellFloor | Reason::PackFloor)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Controller {
     pub cfg: Config,

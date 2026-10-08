@@ -1,7 +1,9 @@
+use crate::chemistry::PackProfile;
+use crate::gauge::Gauge;
 use anyhow::{Context, Result, bail};
 use battery_control::Reading;
-use crate::chemistry::PackProfile;
 use battery_control::{Battery, DeviceInfo};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
@@ -183,6 +185,10 @@ pub trait Pack {
     fn observe(&mut self, volts: f64, amps: f64) {
         let _ = (volts, amps);
     }
+
+    fn gauge(&mut self) -> Option<&mut Gauge> {
+        None
+    }
 }
 
 /// Pick the instrument reading that actually describes the battery.
@@ -215,6 +221,8 @@ pub struct BlindPack {
     volts: f64,
     amps: f64,
     profile: PackProfile,
+    gauge: Gauge,
+    counted_at: Option<Instant>,
 }
 
 impl BlindPack {
@@ -228,6 +236,8 @@ impl BlindPack {
             volts: 0.0,
             amps: 0.0,
             profile: PackProfile::default(),
+            gauge: Gauge::default(),
+            counted_at: None,
         }
     }
 }
@@ -246,6 +256,13 @@ impl Pack for BlindPack {
     }
 
     fn observe(&mut self, volts: f64, amps: f64) {
+        let now = Instant::now();
+        let hours = self
+            .counted_at
+            .map(|t| now.saturating_duration_since(t).as_secs_f64() / 3600.0)
+            .unwrap_or(0.0);
+        self.gauge.count((self.amps + amps) / 2.0 * hours);
+        self.counted_at = Some(now);
         self.volts = volts;
         self.amps = amps;
     }
@@ -253,21 +270,25 @@ impl Pack for BlindPack {
     fn lost(&mut self) {
         self.volts = 0.0;
         self.amps = 0.0;
+        self.counted_at = None;
+    }
+
+    fn gauge(&mut self) -> Option<&mut Gauge> {
+        Some(&mut self.gauge)
     }
 
     fn read(&mut self) -> Result<Snapshot> {
-        // SOC from the chemistry curve. Honest only at rest, so it is an
-        // estimate and the UI says so.
-        let soc = if self.volts > 0.5 {
-            self.profile.soc_from_pack_v(self.volts).round() as u8
-        } else {
-            0
+        let counted = self.gauge.soc();
+        let soc = match counted {
+            Some(soc) => soc.round() as u8,
+            None if self.volts > 0.5 => self.profile.soc_from_pack_v(self.volts).round() as u8,
+            None => 0,
         };
         Ok(Snapshot {
             pack_v: self.volts,
             current_a: self.amps,
             soc,
-            soc_estimated: true,
+            soc_estimated: counted.is_none(),
             rated_ah: Some(self.profile.capacity_ah()),
             ..Default::default()
         })
@@ -462,6 +483,8 @@ pub fn open_pack(spec: &str) -> Result<Box<dyn Pack>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gauge::Anchor;
+    use std::time::Duration;
 
     fn snap(cells: &[u16]) -> Snapshot {
         Snapshot {
@@ -541,6 +564,42 @@ mod tests {
         );
         // Nothing connected at all.
         assert_eq!(blind_reading(Some((0.0, 0.0, false)), None), None);
+    }
+
+    #[test]
+    fn a_blind_pack_counts_soc_once_it_knows_its_capacity() {
+        let mut p = BlindPack::open("");
+        p.observe(13.0, 0.0);
+        let s = p.read().unwrap();
+        assert!(s.soc_estimated, "no capacity, nothing to count against");
+
+        let g = p.gauge().unwrap();
+        g.set_capacity(50.0);
+        g.anchor(Anchor::Full);
+        let mut s = p.read().unwrap();
+        assert!(!s.soc_estimated);
+        assert_eq!(s.soc, 100);
+
+        // Forty hours between readings, averaging 0.5 A out of a 50 Ah pack,
+        // leaves 60%.
+        p.counted_at = Some(Instant::now() - Duration::from_secs(40 * 3600));
+        p.observe(12.5, -1.0);
+        s = p.read().unwrap();
+        assert!(!s.soc_estimated);
+        assert_eq!(s.soc, 60);
+
+        // A full discharge places it at empty and measures the pack from what came
+        // out of it since the last full.
+        p.gauge()
+            .unwrap()
+            .anchor(Anchor::Empty { measured_ah: None });
+        let s = p.read().unwrap();
+        assert_eq!(s.soc, 0);
+        let measured = p.gauge().unwrap().capacity_ah().unwrap();
+        assert!((measured - 20.0).abs() < 1e-6, "{measured}");
+
+        p.gauge().unwrap().forget();
+        assert!(p.read().unwrap().soc_estimated);
     }
 
     #[test]

@@ -259,6 +259,12 @@ pub enum Reason {
     LostTelemetry,
 }
 
+impl Reason {
+    pub fn full(self) -> bool {
+        matches!(self, Reason::Terminated | Reason::Balanced)
+    }
+}
+
 /// The control loop as a pure state machine, so it can be tested without a
 /// battery or a power supply attached.
 #[derive(Debug, Clone)]

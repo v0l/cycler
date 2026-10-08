@@ -154,6 +154,11 @@ pub struct Remembered {
     /// capacity means.
     #[serde(default)]
     pub discharge_c_rate: Option<f64>,
+    /// Capacity the last cycle test measured on this pack. A guess about a
+    /// particular battery, so it belongs with the battery it was measured
+    /// on, and has to be forgettable when it goes stale.
+    #[serde(default)]
+    pub learned_ah: Option<f64>,
 }
 
 fn config_path() -> Option<PathBuf> {

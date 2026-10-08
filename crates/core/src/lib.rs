@@ -4,6 +4,7 @@ pub mod chemistry;
 pub mod cycle;
 pub mod discharge;
 pub mod discover;
+pub mod gauge;
 pub mod interrupt;
 pub mod device;
 pub mod log;

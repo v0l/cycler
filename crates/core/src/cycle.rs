@@ -1,6 +1,7 @@
 use crate::charge;
 use crate::device::{LoadMode, LoadState};
 use crate::discharge;
+use crate::gauge::Anchor;
 use crate::pack::Snapshot;
 use std::time::{Duration, Instant};
 
@@ -154,6 +155,8 @@ pub struct Runner {
     pub results: Vec<StepResult>,
     pub note: String,
     done: bool,
+    anchors: Vec<Anchor>,
+    full: bool,
 }
 
 impl Runner {
@@ -168,6 +171,8 @@ impl Runner {
             results: Vec::new(),
             note: "starting".into(),
             done: false,
+            anchors: Vec::new(),
+            full: false,
         }
     }
 
@@ -223,6 +228,17 @@ impl Runner {
             .rev()
             .find(|r| r.label.starts_with("discharge"))
             .and_then(|r| r.amp_hours)
+    }
+
+    pub fn take_anchors(&mut self) -> Vec<Anchor> {
+        std::mem::take(&mut self.anchors)
+    }
+
+    fn reached_full(&mut self) {
+        if !self.full {
+            self.full = true;
+            self.anchors.push(Anchor::Full);
+        }
     }
 
     /// Retune the running charge and every charge still to come, so a change
@@ -286,7 +302,17 @@ impl Runner {
                 demand.charger_v = c.set_v;
                 demand.charger_a = c.set_a;
                 self.note = c.note.clone();
-                if let Some(r) = c.finished() {
+                let floating = c.phase == charge::Phase::Float;
+                let ended = c.finished();
+                if floating {
+                    self.reached_full();
+                }
+                if let Some(r) = ended {
+                    if r.full() {
+                        self.reached_full();
+                    } else {
+                        self.full = false;
+                    }
                     finished = Some((format!("{r:?}"), None));
                 }
             }
@@ -305,6 +331,12 @@ impl Runner {
                 demand.load_cutoff_v = d.cfg.pack_floor_v;
                 self.note = d.note.clone();
                 if let Some(r) = d.finished() {
+                    if r.empty() {
+                        self.anchors.push(Anchor::Empty {
+                            measured_ah: self.full.then_some(d.amp_hours),
+                        });
+                    }
+                    self.full = false;
                     finished = Some((format!("{r:?}"), Some(d.amp_hours)));
                 }
             }
@@ -414,6 +446,11 @@ pub fn run(
         };
         let load_state = load.as_mut().and_then(|l| l.state().ok());
         let want = runner.step_sample(&snapshot, load_state, Instant::now());
+        for a in runner.take_anchors() {
+            if let Some(g) = pack.gauge() {
+                g.anchor(a);
+            }
+        }
 
         if let Some(c) = charger.as_mut() {
             if want.charger_on
@@ -565,5 +602,85 @@ mod tests {
     fn a_single_charge_is_just_a_one_step_plan() {
         let p = Plan::charge(charge::Config::default());
         assert_eq!(p.total_steps(), 1);
+    }
+
+    fn full_plan() -> Plan {
+        Plan {
+            steps: vec![
+                Step::Charge(charge::Config {
+                    v_absorb: 14.4,
+                    v_precharge: 11.0,
+                    i_max: 2.0,
+                    i_term: 0.5,
+                    stall_timeout: Duration::ZERO,
+                    ..Default::default()
+                }),
+                Step::Discharge(discharge::Config {
+                    pack_floor_v: 10.5,
+                    stall_timeout: Duration::ZERO,
+                    ..Default::default()
+                }),
+            ],
+            repeat: 1,
+        }
+    }
+
+    fn blind(volts: f64, amps: f64) -> Snapshot {
+        Snapshot {
+            pack_v: volts,
+            current_a: amps,
+            temp_c: 25.0,
+            ..Default::default()
+        }
+    }
+
+    fn discharge_load(ah: f64, on: bool) -> LoadState {
+        LoadState {
+            amp_hours: ah,
+            on,
+            volts: 12.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_full_charge_then_an_empty_discharge_anchors_both_ends() {
+        let mut r = Runner::new(full_plan());
+        let mut t = Instant::now();
+        while r.current_label().starts_with("charge") {
+            t += Duration::from_secs(30);
+            r.step_sample(&blind(14.4, 0.3), None, t);
+        }
+        assert_eq!(r.take_anchors(), vec![Anchor::Full]);
+        while !r.current_label().starts_with("discharge") {
+            t += Duration::from_secs(30);
+            r.step_sample(&blind(12.0, 0.0), None, t);
+        }
+        let mut ah = 0.0;
+        while r
+            .step_sample(&blind(12.0, -2.0), Some(discharge_load(ah, true)), t)
+            .load_on
+            && ah < 46.0
+        {
+            t += Duration::from_secs(30);
+            ah += 1.0;
+        }
+        t += Duration::from_secs(30);
+        r.step_sample(&blind(10.4, 0.0), Some(discharge_load(46.0, false)), t);
+        assert_eq!(
+            r.take_anchors(),
+            vec![Anchor::Empty {
+                measured_ah: Some(46.0)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_charge_that_ends_at_the_ceiling_leaves_the_pack_unanchored() {
+        let mut r = Runner::new(plan());
+        let t = Instant::now();
+        r.step_sample(&snap(&[3300]), None, t);
+        r.step_sample(&snap(&[3500]), None, t);
+        assert!(r.take_anchors().is_empty());
     }
 }
