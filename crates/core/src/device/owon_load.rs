@@ -83,14 +83,14 @@ fn limits_from_model(idn: &str) -> Limits {
 
 impl OwonLoad {
     pub fn open(path: &str) -> Result<Self> {
-        let bauds: Vec<u32> = match std::env::var("OWON_LOAD_BAUD")
+        let baud: u32 = std::env::var("OWON_LOAD_BAUD")
             .ok()
             .and_then(|v| v.parse().ok())
-        {
-            Some(b) => vec![b],
-            None => vec![115_200, 9600, 19_200, 38_400, 57_600],
-        };
-        let (mut io, idn) = Self::find_baud(path, &bauds)?;
+            .unwrap_or(115_200);
+        let mut io = Scpi::open(path, baud).context("opening OWON load")?;
+        let idn = io
+            .identify()
+            .with_context(|| format!("no SCPI reply on {path} at {baud}"))?;
         if !idn.to_ascii_uppercase().contains("OEL") {
             bail!("not an OWON OEL load: {idn:?}");
         }
@@ -104,19 +104,6 @@ impl OwonLoad {
             battery_mode: false,
             tally: Tally::default(),
         })
-    }
-
-    fn find_baud(path: &str, bauds: &[u32]) -> Result<(Scpi, String)> {
-        let mut last = None;
-        for &baud in bauds {
-            let mut io = Scpi::open(path, baud).context("opening OWON load")?;
-            match io.identify() {
-                Ok(idn) => return Ok((io, idn)),
-                Err(e) => last = Some(e),
-            }
-        }
-        Err(last.unwrap_or_else(|| anyhow::anyhow!("no baud rates to try")))
-            .with_context(|| format!("no SCPI reply on {path} at {bauds:?}"))
     }
 
     fn num(&mut self, q: &str) -> Result<f64> {
