@@ -11,6 +11,9 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of Cycler is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
+    <Icon Id="AppIcon" SourceFile="packaging\windows\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/v0l/cycler" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -31,7 +34,7 @@
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Component Id="CyclerShortcut" Guid="a4f0f3f0-2d8a-4a17-9a1a-6d0b6f5d9c11">
-        <Shortcut Id="CyclerUiShortcut" Name="Cycler" Target="[#CyclerUiExe]" WorkingDirectory="INSTALLFOLDER" />
+        <Shortcut Id="CyclerUiShortcut" Icon="AppIcon" Name="Cycler" Target="[#CyclerUiExe]" WorkingDirectory="INSTALLFOLDER" />
         <RegistryValue Root="HKLM" Key="Software\v0l\Cycler" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </StandardDirectory>

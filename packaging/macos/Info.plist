@@ -10,6 +10,8 @@
 	<string>io.v0l.cycler</string>
 	<key>CFBundleExecutable</key>
 	<string>cycler-ui</string>
+	<key>CFBundleIconFile</key>
+	<string>icon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
