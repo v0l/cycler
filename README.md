@@ -1,9 +1,14 @@
+<img src="assets/icon.svg" width="64" alt="">
+
 # cycler
 
 Battery cycle testing driven by the cells rather than by pack voltage. It
 charges, rests, discharges and counts amp-hours, and every decision it makes
 (taper, float, cut off) is made on the highest or lowest cell, because a pack
 with one weak cell is only as good as that cell.
+
+Part of the [bench suite](https://github.com/v0l/bench-suite), a launcher that installs, updates
+and starts it alongside the other bench tools.
 
 Built for a Pylontech US2000C on the bench with an OWON bench supply and a
 programmable load, but the devices sit behind traits: a pack is anything that

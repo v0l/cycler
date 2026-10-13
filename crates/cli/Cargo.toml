@@ -25,6 +25,7 @@ assets = [
     ["target/release/cycler", "usr/bin/", "755"],
     ["target/release/cycler-ui", "usr/bin/", "755"],
     ["../../packaging/linux/cycler.desktop", "usr/share/applications/", "644"],
+    ["../ui/assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/cycler.png", "644"],
     ["../../README.md", "usr/share/doc/cycler/README.md", "644"],
 ]
 

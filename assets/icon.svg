@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="t d">
+  <title id="t">Cycler</title>
+  <desc id="d">A cell with its voltage climbing on charge and falling on discharge, cycle after cycle, the last one still charging.</desc>
+  <rect width="64" height="64" rx="14" fill="#0B1014"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="6" y="17" width="46" height="30" rx="4" stroke="#2FD3E1" stroke-width="3"/>
+    <path d="M57 27v10" stroke="#2FD3E1" stroke-width="3.2"/>
+    <path d="M12 40C14 30 16 25 19 24.5H21C23 30 24 35 26 40C28 30 30 25 33 24.5H35C37 30 38 35 40 40" stroke="#2FD3E1" stroke-width="2.6" opacity=".7"/>
+    <path d="M40 40C42 30 44 25 47 24.5" stroke="#FFB020" stroke-width="2.8"/>
+  </g>
+</svg>
