@@ -6,6 +6,8 @@ All notable changes to Cycler are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-14
+
 ### Added
 - Windows `.msi` and macOS `.dmg` installers with the Cycler icon.
 - A pack with no BMS counts its state of charge once a capacity test has measured it.
@@ -41,6 +43,7 @@ First release.
 - `cycler` on the command line and `cycler-ui` with stage rails and a cell comb, which
   `--demo` plays back from recorded data.
 
-[Unreleased]: https://github.com/v0l/cycler/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/v0l/cycler/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/v0l/cycler/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/v0l/cycler/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/v0l/cycler/releases/tag/v0.1.0
