@@ -12,8 +12,8 @@ use cycler_core::pack::PACK_BACKENDS;
 use devices::{Choice, Remembered};
 use egui::{Color32, RichText};
 use egui_bench::prelude::{
-    action, card, exit_note, hero, lamp, legend, note, readouts, stage_rail, theme, toggle, Channel,
-    Comb,
+    card, choice, exit_note, hero, lamp, legend, note, readouts, stage_rail, theme, toggle, Channel,
+    Comb, Key,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -769,7 +769,7 @@ impl App {
             ui,
             rail,
             |ui| {
-                ui.label(RichText::new(name).size(12.5).strong().color(theme::VALUE));
+                ui.label(RichText::new(name).font(theme::legend_font(12.5)).color(theme::VALUE));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let alarms = snapshot.as_ref().map(|s| s.alarms.len()).unwrap_or(0);
                     if alarms > 0 {
@@ -843,7 +843,7 @@ impl App {
                     );
                     let mut forget = false;
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        if learned.is_some() && ui.button(action("Forget capacity")).clicked() {
+                        if learned.is_some() && ui.add(Key::new("forget capacity").outline(theme::VALUE)).clicked() {
                             forget = true;
                         }
                     });
@@ -1526,7 +1526,7 @@ impl App {
             |ui| {
                 ui.label(legend("devices"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("rescan").clicked() {
+                    if ui.add(Key::new("rescan").outline(theme::VALUE)).clicked() {
                         header_rescan = true;
                     }
                 });
@@ -1549,24 +1549,15 @@ impl App {
                         }
                     });
                     let w = ui.available_width().max(0.0);
-                    let label = elide(pick.backend().map(|b| b.label).unwrap_or("none"), 36);
-                    egui::ComboBox::from_id_salt(("backend", pick.role))
-                        .selected_text(RichText::new(label).size(11.5))
-                        .width(w)
-                        .show_ui(ui, |ui| {
-                            for (i, b) in pick.backends.iter().enumerate() {
-                                if ui
-                                    .selectable_value(
-                                        &mut pick.backend,
-                                        i,
-                                        RichText::new(elide(b.label, 40)).size(11.5),
-                                    )
-                                    .changed()
-                                {
-                                    rescan = true;
-                                }
-                            }
-                        });
+                    let options: Vec<(usize, String)> = pick
+                        .backends
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| (i, elide(b.label, 40)))
+                        .collect();
+                    if choice(ui, ("backend", pick.role), &mut pick.backend, options) {
+                        rescan = true;
+                    }
                     if pick.scanning() {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(12.0));
@@ -1609,19 +1600,11 @@ impl App {
                 // default target.
                 let busy = scanning_any;
                 let pending = self.pending_connect();
-                ui.add_enabled_ui(!busy, |ui| {
-                    let text = if pending {
-                        RichText::new("Connect")
-                            .font(theme::legend_font(theme::VALUE_SIZE + 0.5))
-                            .color(theme::READOUT)
-                            .strong()
-                    } else {
-                        action("Connect")
-                    };
-                    if ui.button(text).clicked() {
-                        reconnect = true;
-                    }
-                });
+                let tint = if pending { theme::READOUT } else { theme::VALUE };
+                let look = if pending { Key::new("connect").solid(tint) } else { Key::new("connect").outline(tint) };
+                if ui.add(look.enabled(!busy)).clicked() {
+                    reconnect = true;
+                }
                 if pending {
                     // Changing a dropdown does nothing until the session is
                     // reopened, and a stale session looks exactly like a
@@ -1668,14 +1651,12 @@ impl App {
                 // A BMS reports its cells and often its rating; it never
                 // reports chemistry. So that is the only thing left to choose
                 // when one is connected.
-                egui::ComboBox::from_id_salt("chemistry")
-                    .selected_text(self.profile.chemistry.label())
-                    .width(ui.available_width().max(0.0))
-                    .show_ui(ui, |ui| {
-                        for c in Chemistry::ALL {
-                            ui.selectable_value(&mut self.profile.chemistry, c, c.label());
-                        }
-                    });
+                choice(
+                    ui,
+                    "chemistry",
+                    &mut self.profile.chemistry,
+                    Chemistry::ALL.into_iter().map(|c| (c, c.label().to_string())),
+                );
                 // A rate typed for one chemistry means nothing for the next:
                 // C/5 is gentle on lithium and abuse on lead-acid.
                 if self.profile.chemistry != before.chemistry {
@@ -1735,7 +1716,7 @@ impl App {
                     ),
                     theme::LEGEND,
                 );
-                if ui.button(action("Apply to limits")).clicked() {
+                if ui.add(Key::new("apply to limits").outline(theme::READOUT)).clicked() {
                     apply = true;
                 }
             },
@@ -1778,18 +1759,16 @@ impl App {
                 // charge changes what the machine already decided.
                 let locked = self.charging();
                 ui.add_enabled_ui(!locked, |ui| {
-                    egui::ComboBox::from_id_salt("mode")
-                        .selected_text(match self.mode {
-                            Mode::Standard => "Standard",
-                            Mode::TopBalance => "Top balance",
-                            Mode::BulkOnly => "Bulk only",
-                        })
-                        .width(ui.available_width().max(0.0))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.mode, Mode::Standard, "Standard");
-                            ui.selectable_value(&mut self.mode, Mode::TopBalance, "Top balance");
-                            ui.selectable_value(&mut self.mode, Mode::BulkOnly, "Bulk only");
-                        });
+                    choice(
+                        ui,
+                        "mode",
+                        &mut self.mode,
+                        [
+                            (Mode::Standard, "Standard".to_string()),
+                            (Mode::TopBalance, "Top balance".to_string()),
+                            (Mode::BulkOnly, "Bulk only".to_string()),
+                        ],
+                    );
                 });
                 note(
                     ui,
@@ -1851,11 +1830,7 @@ impl App {
                 if self.stop_on_alarm {
                     ui.horizontal(|ui| {
                         ui.label(legend("except"));
-                        ui.add_sized(
-                            [150.0, 18.0],
-                            egui::TextEdit::singleline(&mut self.alarm_ignore_list)
-                                .hint_text("balanc, charging"),
-                        );
+                        egui_bench::form::field(ui, &mut self.alarm_ignore_list, "balanc, charging");
                     });
                 } else {
                     note(
@@ -1916,18 +1891,12 @@ impl App {
                 }
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(
-                            !pending && busy.is_none(),
-                            egui::Button::new(action("Charge")),
-                        )
+                        .add(Key::new("charge").solid(theme::READOUT).enabled(!pending && busy.is_none()))
                         .clicked()
                     {
                         self.send(Command::Start(self.plan(false)));
                     }
-                    if ui
-                        .button(RichText::new("Stop").font(theme::legend_font(theme::VALUE_SIZE + 0.5)).color(theme::FAULT))
-                        .clicked()
-                    {
+                    if ui.add(Key::new("stop").outline(theme::FAULT)).clicked() {
                         self.send(Command::Stop);
                     }
                 });
@@ -1988,18 +1957,12 @@ impl App {
                 let before = self.load_tuning();
                 let mut picked = self.discharge_mode;
                 ui.add_enabled_ui(!running, |ui| {
-                    egui::ComboBox::from_id_salt("load_mode")
-                        .selected_text(self.discharge_mode.label())
-                        .width(ui.available_width())
-                        .show_ui(ui, |ui| {
-                            for m in modes {
-                                ui.selectable_value(
-                                    &mut picked,
-                                    m,
-                                    format!("{} ({})", m.label(), m.unit()),
-                                );
-                            }
-                        });
+                    choice(
+                        ui,
+                        "load_mode",
+                        &mut picked,
+                        modes.into_iter().map(|m| (m, format!("{} ({})", m.label(), m.unit()))),
+                    );
                 });
                 if picked != self.discharge_mode {
                     self.discharge_a =
@@ -2055,18 +2018,12 @@ impl App {
                 }
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(
-                            !pending && busy.is_none(),
-                            egui::Button::new(action("Discharge")),
-                        )
+                        .add(Key::new("discharge").solid(theme::READOUT).enabled(!pending && busy.is_none()))
                         .clicked()
                     {
                         self.send(Command::Start(Plan::discharge(self.discharge_config())));
                     }
-                    if ui
-                        .button(RichText::new("Stop").font(theme::legend_font(theme::VALUE_SIZE + 0.5)).color(theme::FAULT))
-                        .clicked()
-                    {
+                    if ui.add(Key::new("stop").outline(theme::FAULT)).clicked() {
                         self.send(Command::Stop);
                     }
                 });
@@ -2142,10 +2099,7 @@ impl App {
                     note(ui, format!("{what}: stop it to run a test."), theme::LEGEND);
                 }
                 if ui
-                    .add_enabled(
-                        busy.is_none(),
-                        egui::Button::new(action("Run capacity test")),
-                    )
+                    .add(Key::new("run capacity test").solid(theme::READOUT).enabled(busy.is_none()))
                     .clicked()
                 {
                     self.send(Command::Start(self.plan(true)));
@@ -2155,7 +2109,6 @@ impl App {
                     && (u.running || !u.results.is_empty())
                 {
                     ui.add_space(4.0);
-                    ui.separator();
                     if u.running {
                         ui.label(
                             RichText::new(format!(
