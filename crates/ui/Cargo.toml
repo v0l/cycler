@@ -17,7 +17,7 @@ cycler-core.workspace = true
 anyhow.workspace = true
 eframe = "0.37"
 egui = "0.37"
-egui_bench = "0.9.1"
+egui_bench = "0.9.2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 signal-hook = "0.4.4"
