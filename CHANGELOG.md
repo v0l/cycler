@@ -6,6 +6,12 @@ All notable changes to Cycler are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-25
+
+### Changed
+- Every release now includes a source archive with its checksum, so the build can be read and rebuilt without GitHub.
+- Uses egui_bench 0.9.2.
+
 ## [0.2.1] - 2026-10-31
 
 ### Changed
